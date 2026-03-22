@@ -34,6 +34,8 @@ async function submitSignal(signal: MarketSignal) {
       close_time: signal.closeTime,
       resolution_criteria: signal.resolutionCriteria,
       source_of_truth_url: signal.sourceOfTruthUrl,
+      resolution_kind: signal.resolutionKind,
+      resolution_metadata: signal.resolutionMetadata,
       dedupe_key: dedupeKey,
       origin: "automation",
       signal_source_id: signal.sourceId,

@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import type { ResolutionKind, ResolutionMetadata } from "@agentic-polymarket/sdk-types";
 
 type MarketRecord = {
   id: string;
@@ -10,6 +11,8 @@ type MarketRecord = {
   category: string;
   close_time: string;
   resolution_source: string;
+  resolution_kind: ResolutionKind;
+  resolution_metadata: ResolutionMetadata;
   last_traded_price_yes: number | null;
   volume_24h: number;
   liquidity_score: number;
@@ -37,9 +40,19 @@ app.post("/v1/internal/markets", async (request, reply) => {
     close_time?: string;
     resolution_criteria?: string;
     source_of_truth_url?: string;
+    resolution_kind?: ResolutionKind;
+    resolution_metadata?: ResolutionMetadata;
   };
 
-  if (!body.proposal_id || !body.title || !body.close_time || !body.resolution_criteria || !body.source_of_truth_url) {
+  if (
+    !body.proposal_id ||
+    !body.title ||
+    !body.close_time ||
+    !body.resolution_criteria ||
+    !body.source_of_truth_url ||
+    !body.resolution_kind ||
+    !body.resolution_metadata
+  ) {
     reply.code(400);
     return { error: "invalid_market_creation_request" };
   }
@@ -59,6 +72,8 @@ app.post("/v1/internal/markets", async (request, reply) => {
     category: body.category ?? "uncategorized",
     close_time: body.close_time,
     resolution_source: body.source_of_truth_url,
+    resolution_kind: body.resolution_kind,
+    resolution_metadata: body.resolution_metadata,
     last_traded_price_yes: null,
     volume_24h: 0,
     liquidity_score: 0,

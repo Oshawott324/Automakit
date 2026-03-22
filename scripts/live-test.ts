@@ -93,6 +93,12 @@ async function main() {
         resolutionCriteria:
           "Resolve YES if BTC spot trades above 100,000 USD on or before the close time.",
         sourceOfTruthUrl: "https://www.cmegroup.com/",
+        resolutionKind: "price_threshold",
+        resolutionMetadata: {
+          kind: "price_threshold",
+          operator: "gt",
+          threshold: 100000,
+        },
       },
       {
         sourceId: "fed-cut-jul-2026",
@@ -103,6 +109,11 @@ async function main() {
         resolutionCriteria:
           "Resolve YES if the federal funds target range is lowered before the close time.",
         sourceOfTruthUrl: "https://www.federalreserve.gov/",
+        resolutionKind: "rate_decision",
+        resolutionMetadata: {
+          kind: "rate_decision",
+          direction: "cut",
+        },
       },
     ],
   };
@@ -229,11 +240,12 @@ async function main() {
         body: JSON.stringify({
           market_id: btcMarket.id,
           evidence_type: "url",
-          claimed_outcome: "YES",
           summary: "Outcome YES confirmed from official source.",
           source_url: "https://www.cmegroup.com/markets/cryptocurrencies/bitcoin.html",
           observed_at: "2026-06-30T20:00:00Z",
-          observed_value: "100500",
+          observation_payload: {
+            price: 100500,
+          },
         }),
       });
 
@@ -245,13 +257,19 @@ async function main() {
     const conflictingEvidence = [
       {
         agentId: "resolver-gamma",
-        claimed_outcome: "YES",
         summary: "Outcome YES according to official rate decision source.",
+        observation_payload: {
+          previous_upper_bound_bps: 450,
+          current_upper_bound_bps: 425,
+        },
       },
       {
         agentId: "resolver-delta",
-        claimed_outcome: "NO",
         summary: "Outcome NO according to official rate decision source.",
+        observation_payload: {
+          previous_upper_bound_bps: 450,
+          current_upper_bound_bps: 450,
+        },
       },
     ];
 
@@ -265,11 +283,10 @@ async function main() {
         body: JSON.stringify({
           market_id: fedMarket.id,
           evidence_type: "url",
-          claimed_outcome: entry.claimed_outcome,
           summary: entry.summary,
           source_url: "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm",
           observed_at: "2026-07-31T19:00:00Z",
-          observed_value: "unchanged",
+          observation_payload: entry.observation_payload,
         }),
       });
 

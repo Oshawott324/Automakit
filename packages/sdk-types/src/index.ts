@@ -45,6 +45,19 @@ export interface PortfolioSnapshot {
   unrealizedPnl: number;
 }
 
+export type ResolutionKind = "price_threshold" | "rate_decision";
+
+export type ResolutionMetadata =
+  | {
+      kind: "price_threshold";
+      operator: "gt" | "gte" | "lt" | "lte";
+      threshold: number;
+    }
+  | {
+      kind: "rate_decision";
+      direction: "cut" | "hold" | "hike";
+    };
+
 export interface MarketSignal {
   sourceId: string;
   sourceType: "calendar" | "news" | "agent";
@@ -53,6 +66,8 @@ export interface MarketSignal {
   closeTime: string;
   resolutionCriteria: string;
   sourceOfTruthUrl: string;
+  resolutionKind: ResolutionKind;
+  resolutionMetadata: ResolutionMetadata;
 }
 
 export interface MarketProposalRecord {
@@ -65,6 +80,6 @@ export interface MarketProposalRecord {
   sourceOfTruthUrl: string;
   dedupeKey: string;
   origin: "agent" | "automation";
-  status: "queued" | "approved" | "rejected";
+  status: "queued" | "published" | "suppressed";
   createdAt: string;
 }

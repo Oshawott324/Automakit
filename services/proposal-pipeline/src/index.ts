@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
+import type { ResolutionKind, ResolutionMetadata } from "@agentic-polymarket/sdk-types";
 
 type Proposal = {
   id: string;
@@ -9,6 +10,8 @@ type Proposal = {
   close_time: string;
   resolution_criteria: string;
   source_of_truth_url: string;
+  resolution_kind: ResolutionKind;
+  resolution_metadata: ResolutionMetadata;
   dedupe_key: string;
   origin: "agent" | "automation";
   signal_source_id?: string;
@@ -34,12 +37,47 @@ function scoreProposal(input: {
   title?: string;
   source_of_truth_url?: string;
   signal_source_type?: "calendar" | "news" | "agent";
+  resolution_kind?: ResolutionKind;
+  resolution_metadata?: ResolutionMetadata;
 }): { confidenceScore: number; status: Proposal["status"]; autonomyNote: string } {
   if (!input.title || !input.source_of_truth_url) {
     return {
       confidenceScore: 0,
       status: "suppressed" as const,
       autonomyNote: "Missing required title or source of truth.",
+    };
+  }
+
+  if (!input.resolution_kind || !input.resolution_metadata) {
+    return {
+      confidenceScore: 0,
+      status: "suppressed" as const,
+      autonomyNote: "Missing deterministic resolution definition.",
+    };
+  }
+
+  if (
+    input.resolution_kind === "price_threshold" &&
+    !(
+      input.resolution_metadata.kind === "price_threshold" &&
+      typeof input.resolution_metadata.threshold === "number"
+    )
+  ) {
+    return {
+      confidenceScore: 0,
+      status: "suppressed" as const,
+      autonomyNote: "Invalid price-threshold resolution metadata.",
+    };
+  }
+
+  if (
+    input.resolution_kind === "rate_decision" &&
+    !(input.resolution_metadata.kind === "rate_decision")
+  ) {
+    return {
+      confidenceScore: 0,
+      status: "suppressed" as const,
+      autonomyNote: "Invalid rate-decision resolution metadata.",
     };
   }
 
@@ -89,6 +127,8 @@ async function publishMarketFromProposal(proposal: Proposal) {
       close_time: proposal.close_time,
       resolution_criteria: proposal.resolution_criteria,
       source_of_truth_url: proposal.source_of_truth_url,
+      resolution_kind: proposal.resolution_kind,
+      resolution_metadata: proposal.resolution_metadata,
     }),
   });
 
@@ -133,6 +173,8 @@ app.post("/v1/market-proposals", async (request, reply) => {
     close_time?: string;
     resolution_criteria?: string;
     source_of_truth_url?: string;
+    resolution_kind?: ResolutionKind;
+    resolution_metadata?: ResolutionMetadata;
     dedupe_key?: string;
     origin?: "agent" | "automation";
     signal_source_id?: string;
@@ -162,6 +204,14 @@ app.post("/v1/market-proposals", async (request, reply) => {
     close_time: body.close_time ?? new Date(Date.now() + 7 * 24 * 60 * 60_000).toISOString(),
     resolution_criteria: body.resolution_criteria ?? "TBD",
     source_of_truth_url: body.source_of_truth_url ?? "https://example.com",
+    resolution_kind: body.resolution_kind ?? "price_threshold",
+    resolution_metadata:
+      body.resolution_metadata ??
+      ({
+        kind: "price_threshold",
+        operator: "gt",
+        threshold: 0,
+      } satisfies ResolutionMetadata),
     dedupe_key: dedupeKey,
     origin: body.origin ?? "agent",
     signal_source_id: body.signal_source_id,

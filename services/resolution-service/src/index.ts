@@ -1,19 +1,27 @@
 import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
+import type { ResolutionKind, ResolutionMetadata } from "@agentic-polymarket/sdk-types";
 
 type Outcome = "YES" | "NO" | "CANCELED";
 type ResolutionStatus = "pending_evidence" | "finalizing" | "finalized" | "quarantined";
+type ObservationPayload = Record<string, string | number | boolean | null>;
+
+type MarketResolutionDefinition = {
+  resolution_source: string;
+  resolution_kind: ResolutionKind;
+  resolution_metadata: ResolutionMetadata;
+};
 
 type ResolutionEvidence = {
   id: string;
   market_id: string;
   submitter_agent_id: string;
   evidence_type: "url" | "text" | "file";
-  claimed_outcome: Outcome;
+  derived_outcome: Outcome;
   summary: string;
   source_url: string;
   observed_at: string;
-  observed_value?: string;
+  observation_payload: ObservationPayload;
   created_at: string;
 };
 
@@ -47,18 +55,87 @@ function isAllowedSource(candidateUrl: string, canonicalUrl: string) {
   return candidateHost === canonicalHost || candidateHost.endsWith(`.${canonicalHost}`);
 }
 
-async function fetchMarketResolutionSource(marketId: string) {
+async function fetchMarketResolutionDefinition(marketId: string): Promise<MarketResolutionDefinition> {
   const response = await fetch(`${marketServiceUrl}/v1/markets/${marketId}`);
   if (!response.ok) {
     throw new Error(`market lookup failed with ${response.status}`);
   }
 
-  const payload = (await response.json()) as { resolution_source?: string };
-  if (!payload.resolution_source) {
+  const payload = (await response.json()) as {
+    resolution_source?: string;
+    resolution_kind?: ResolutionKind;
+    resolution_metadata?: ResolutionMetadata;
+  };
+  if (!payload.resolution_source || !payload.resolution_kind || !payload.resolution_metadata) {
     throw new Error("market resolution source missing");
   }
 
-  return payload.resolution_source;
+  return {
+    resolution_source: payload.resolution_source,
+    resolution_kind: payload.resolution_kind,
+    resolution_metadata: payload.resolution_metadata,
+  };
+}
+
+function readNumericObservation(payload: ObservationPayload, key: string) {
+  const value = payload[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function deriveOutcomeFromObservation(
+  definition: MarketResolutionDefinition,
+  observationPayload: ObservationPayload,
+): Outcome | null {
+  if (definition.resolution_kind === "price_threshold") {
+    const metadata = definition.resolution_metadata;
+    if (metadata.kind !== "price_threshold") {
+      return null;
+    }
+
+    const observedPrice = readNumericObservation(observationPayload, "price");
+    if (observedPrice === null) {
+      return null;
+    }
+
+    switch (metadata.operator) {
+      case "gt":
+        return observedPrice > metadata.threshold ? "YES" : "NO";
+      case "gte":
+        return observedPrice >= metadata.threshold ? "YES" : "NO";
+      case "lt":
+        return observedPrice < metadata.threshold ? "YES" : "NO";
+      case "lte":
+        return observedPrice <= metadata.threshold ? "YES" : "NO";
+      default:
+        return null;
+    }
+  }
+
+  if (definition.resolution_kind === "rate_decision") {
+    const metadata = definition.resolution_metadata;
+    if (metadata.kind !== "rate_decision") {
+      return null;
+    }
+
+    const previousUpperBound = readNumericObservation(observationPayload, "previous_upper_bound_bps");
+    const currentUpperBound = readNumericObservation(observationPayload, "current_upper_bound_bps");
+    if (previousUpperBound === null || currentUpperBound === null) {
+      return null;
+    }
+
+    switch (metadata.direction) {
+      case "cut":
+        return currentUpperBound < previousUpperBound ? "YES" : "NO";
+      case "hold":
+        return currentUpperBound === previousUpperBound ? "YES" : "NO";
+      case "hike":
+        return currentUpperBound > previousUpperBound ? "YES" : "NO";
+      default:
+        return null;
+    }
+  }
+
+  return null;
 }
 
 function updateResolutionCaseState(resolutionCase: ResolutionCase) {
@@ -73,7 +150,7 @@ function updateResolutionCaseState(resolutionCase: ResolutionCase) {
 
   const counts = new Map<Outcome, number>();
   for (const evidence of resolutionCase.evidence) {
-    counts.set(evidence.claimed_outcome, (counts.get(evidence.claimed_outcome) ?? 0) + 1);
+    counts.set(evidence.derived_outcome, (counts.get(evidence.derived_outcome) ?? 0) + 1);
   }
 
   if (counts.size > 1) {
@@ -103,11 +180,10 @@ app.post("/v1/resolution-evidence", async (request, reply) => {
   const body = request.body as {
     market_id?: string;
     evidence_type?: "url" | "text" | "file";
-    claimed_outcome?: Outcome;
     summary?: string;
     source_url?: string;
     observed_at?: string;
-    observed_value?: string;
+    observation_payload?: ObservationPayload;
   };
   const submitterAgentId = request.headers["x-agent-id"];
   if (typeof submitterAgentId !== "string" || submitterAgentId.length === 0) {
@@ -116,28 +192,33 @@ app.post("/v1/resolution-evidence", async (request, reply) => {
   }
 
   const marketId = body.market_id ?? "unknown-market";
-  const claimedOutcome = body.claimed_outcome;
-  if (!claimedOutcome || !body.source_url || !body.observed_at || !body.summary) {
+  if (!body.source_url || !body.observed_at || !body.summary || !body.observation_payload) {
     reply.code(400);
     return { error: "invalid_resolution_evidence" };
   }
 
-  let canonicalSourceUrl: string;
+  let definition: MarketResolutionDefinition;
   try {
-    canonicalSourceUrl = await fetchMarketResolutionSource(marketId);
+    definition = await fetchMarketResolutionDefinition(marketId);
   } catch (error) {
     reply.code(404);
     return { error: `unknown_market_resolution_source:${String(error)}` };
   }
 
   try {
-    if (!isAllowedSource(body.source_url, canonicalSourceUrl)) {
+    if (!isAllowedSource(body.source_url, definition.resolution_source)) {
       reply.code(422);
       return { error: "source_url_not_allowed_for_market" };
     }
   } catch {
     reply.code(400);
     return { error: "invalid_source_url" };
+  }
+
+  const derivedOutcome = deriveOutcomeFromObservation(definition, body.observation_payload);
+  if (!derivedOutcome) {
+    reply.code(422);
+    return { error: "evidence_not_parseable_for_market_kind" };
   }
 
   const resolutionCase =
@@ -147,7 +228,7 @@ app.post("/v1/resolution-evidence", async (request, reply) => {
       status: "pending_evidence",
       draft_outcome: null,
       final_outcome: null,
-      canonical_source_url: canonicalSourceUrl,
+      canonical_source_url: definition.resolution_source,
       evidence: [],
       quorum_threshold: quorumThreshold,
       last_updated_at: new Date().toISOString(),
@@ -171,11 +252,11 @@ app.post("/v1/resolution-evidence", async (request, reply) => {
     market_id: marketId,
     submitter_agent_id: submitterAgentId,
     evidence_type: body.evidence_type ?? "text",
-    claimed_outcome: claimedOutcome,
+    derived_outcome: derivedOutcome,
     summary: body.summary,
     source_url: body.source_url,
     observed_at: body.observed_at,
-    observed_value: body.observed_value,
+    observation_payload: body.observation_payload,
     created_at: new Date().toISOString(),
   };
 
