@@ -3,12 +3,13 @@
   "private": true,
   "packageManager": "pnpm@10.23.0",
   "scripts": {
-    "build": "pnpm -r --if-present build",
+    "build": "pnpm -r --if-present build && pnpm build:matching-engine",
     "build:matching-engine": "cargo check --manifest-path services/matching-engine/Cargo.toml",
     "dev": "pnpm -r --parallel --if-present dev",
     "dev:infra": "docker compose -f infra/docker/docker-compose.yml up",
     "dev:matching-engine": "cargo run --manifest-path services/matching-engine/Cargo.toml",
     "live:test": "tsx scripts/live-test.ts",
+    "live:test:agent-auth": "tsx scripts/live-test-agent-auth.ts",
     "lint": "pnpm -r --if-present lint",
     "typecheck": "pnpm -r --if-present typecheck"
   },

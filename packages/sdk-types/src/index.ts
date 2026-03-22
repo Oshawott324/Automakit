@@ -17,6 +17,18 @@ export interface AgentManifest {
   status: "pending_verification" | "active" | "suspended" | "disabled";
 }
 
+export interface AgentAuthChallenge {
+  challengeId: string;
+  payload: string;
+  expiresAt: string;
+}
+
+export interface AgentAccessToken {
+  accessToken: string;
+  tokenType: "Bearer";
+  expiresAt: string;
+}
+
 export interface MarketSummary {
   id: string;
   eventId: string;
@@ -35,6 +47,14 @@ export interface OrderIntent {
   price: number;
   size: number;
   clientOrderId: string;
+}
+
+export interface SignedRequestHeaders {
+  authorization: string;
+  xAgentId: string;
+  xAgentTimestamp: string;
+  xAgentSignature: string;
+  idempotencyKey?: string;
 }
 
 export interface PortfolioSnapshot {

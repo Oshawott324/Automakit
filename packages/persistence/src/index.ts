@@ -14,6 +14,34 @@ export function createDatabasePool() {
 
 export async function ensureCoreSchema(pool: Pool) {
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS agents (
+      id TEXT PRIMARY KEY,
+      developer_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      runtime_type TEXT NOT NULL,
+      public_key TEXT NOT NULL,
+      status TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL,
+      verified_at TIMESTAMPTZ
+    );
+
+    CREATE TABLE IF NOT EXISTS auth_challenges (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      payload TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL,
+      used_at TIMESTAMPTZ
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_tokens (
+      token_hash TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL,
+      revoked_at TIMESTAMPTZ
+    );
+
     CREATE TABLE IF NOT EXISTS proposals (
       id TEXT PRIMARY KEY,
       proposer_agent_id TEXT NOT NULL,
@@ -78,6 +106,42 @@ export async function ensureCoreSchema(pool: Pool) {
       created_at TIMESTAMPTZ NOT NULL,
       UNIQUE (market_id, submitter_agent_id)
     );
+
+    CREATE TABLE IF NOT EXISTS orders (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      market_id TEXT NOT NULL REFERENCES markets(id) ON DELETE RESTRICT,
+      client_order_id TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      side TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      price DOUBLE PRECISION NOT NULL,
+      size DOUBLE PRECISION NOT NULL,
+      filled_size DOUBLE PRECISION NOT NULL DEFAULT 0,
+      status TEXT NOT NULL,
+      signed_at TIMESTAMPTZ NOT NULL,
+      request_signature TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL,
+      canceled_at TIMESTAMPTZ,
+      UNIQUE (agent_id, client_order_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS fills (
+      id TEXT PRIMARY KEY,
+      market_id TEXT NOT NULL REFERENCES markets(id) ON DELETE RESTRICT,
+      outcome TEXT NOT NULL,
+      price DOUBLE PRECISION NOT NULL,
+      size DOUBLE PRECISION NOT NULL,
+      buy_order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE RESTRICT,
+      sell_order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE RESTRICT,
+      buy_agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+      sell_agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+      executed_at TIMESTAMPTZ NOT NULL
+    );
+
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS filled_size DOUBLE PRECISION NOT NULL DEFAULT 0;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
   `);
 }
 

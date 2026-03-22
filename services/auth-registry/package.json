@@ -6,9 +6,11 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@agentic-polymarket/persistence": "workspace:*",
     "fastify": "^5.3.2"
   }
 }
