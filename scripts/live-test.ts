@@ -1,10 +1,19 @@
 import { spawn } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
 import http from "node:http";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { Pool } from "pg";
 
 type ManagedProcess = {
   name: string;
   child: ReturnType<typeof spawn>;
+  command: string;
+  args: string[];
+  extraEnv: Record<string, string>;
+  cwd: string;
 };
 
 function startProcess(
@@ -30,7 +39,7 @@ function startProcess(
     process.stderr.write(`[${name}] ${chunk}`);
   });
 
-  return { name, child };
+  return { name, child, command, args, extraEnv, cwd };
 }
 
 async function waitForJson(url: string, attempts = 50) {
@@ -81,7 +90,80 @@ async function waitForCondition(
   throw new Error(`Timed out waiting for condition: ${label}`);
 }
 
+async function reservePort() {
+  return new Promise<number>((resolve, reject) => {
+    const server = net.createServer();
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        reject(new Error("Failed to reserve an ephemeral port"));
+        return;
+      }
+      const { port } = address;
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(port);
+      });
+    });
+    server.on("error", reject);
+  });
+}
+
+async function waitForDatabase(databaseUrl: string, attempts = 60) {
+  for (let index = 0; index < attempts; index += 1) {
+    const pool = new Pool({ connectionString: databaseUrl });
+    try {
+      await pool.query("SELECT 1");
+      await pool.end();
+      return;
+    } catch {
+      await pool.end().catch(() => undefined);
+      await delay(1000);
+    }
+  }
+
+  throw new Error(`Timed out waiting for Postgres at ${databaseUrl}`);
+}
+
+async function stopProcess(process: ManagedProcess) {
+  await new Promise<void>((resolve) => {
+    if (process.child.exitCode !== null) {
+      resolve();
+      return;
+    }
+
+    process.child.once("exit", () => resolve());
+    process.child.kill("SIGTERM");
+    setTimeout(() => {
+      if (process.child.exitCode === null) {
+        process.child.kill("SIGKILL");
+      }
+    }, 1000);
+  });
+}
+
+function restartProcess(processes: ManagedProcess[], process: ManagedProcess) {
+  const index = processes.indexOf(process);
+  const restarted = startProcess(process.name, process.command, process.args, process.extraEnv, process.cwd);
+  if (index >= 0) {
+    processes[index] = restarted;
+  } else {
+    processes.push(restarted);
+  }
+  return restarted;
+}
+
 async function main() {
+  const databasePort = await reservePort();
+  const feedPort = await reservePort();
+  const databaseDirectory = await mkdtemp(path.join(os.tmpdir(), "agentic-polymarket-live-test-"));
+  const databaseUrl = `postgres://postgres:postgres@127.0.0.1:${databasePort}/postgres`;
+  const repoRoot = process.cwd();
+  const nextBin = path.join(repoRoot, "node_modules", ".pnpm", "node_modules", ".bin", "next");
+  const pgliteServerBin = path.join(repoRoot, "node_modules", ".bin", "pglite-server");
   const signalPayload = {
     items: [
       {
@@ -130,61 +212,96 @@ async function main() {
   });
 
   await new Promise<void>((resolve) => {
-    feedServer.listen(4100, "127.0.0.1", () => resolve());
+    feedServer.listen(feedPort, "127.0.0.1", () => resolve());
   });
 
   const processes: ManagedProcess[] = [];
   try {
     processes.push(
-      startProcess("market-service", "pnpm", ["--filter", "@agentic-polymarket/market-service", "start"]),
+      startProcess(
+        "database",
+        pgliteServerBin,
+        [
+          "--db",
+          databaseDirectory,
+          "--host",
+          "127.0.0.1",
+          "--port",
+          String(databasePort),
+          "--max-connections",
+          "16",
+        ],
+      ),
+    );
+    await waitForDatabase(databaseUrl);
+
+    processes.push(
+      startProcess(
+        "market-service",
+        process.execPath,
+        ["dist/index.js"],
+        {
+          DATABASE_URL: databaseUrl,
+        },
+        path.join(repoRoot, "services", "market-service"),
+      ),
     );
     processes.push(
       startProcess(
         "proposal-pipeline",
-        "pnpm",
-        ["--filter", "@agentic-polymarket/proposal-pipeline", "start"],
+        process.execPath,
+        ["dist/index.js"],
         {
+          DATABASE_URL: databaseUrl,
           MARKET_SERVICE_URL: "http://127.0.0.1:4003",
         },
+        path.join(repoRoot, "services", "proposal-pipeline"),
       ),
     );
     processes.push(
       startProcess(
         "resolution-service",
-        "pnpm",
-        ["--filter", "@agentic-polymarket/resolution-service", "start"],
+        process.execPath,
+        ["dist/index.js"],
+        {
+          DATABASE_URL: databaseUrl,
+        },
+        path.join(repoRoot, "services", "resolution-service"),
       ),
     );
     processes.push(
       startProcess(
         "market-creator",
-        "pnpm",
-        ["--filter", "@agentic-polymarket/market-creator", "start"],
+        process.execPath,
+        ["dist/index.js"],
         {
           PROPOSAL_PIPELINE_URL: "http://127.0.0.1:4005",
-          MARKET_CREATOR_SIGNAL_FEED_URLS: "http://127.0.0.1:4100/signals",
+          MARKET_CREATOR_SIGNAL_FEED_URLS: `http://127.0.0.1:${feedPort}/signals`,
           MARKET_CREATOR_INTERVAL_MS: "1000",
         },
+        path.join(repoRoot, "services", "market-creator"),
       ),
     );
     processes.push(
       startProcess(
         "web",
-        "pnpm",
-        ["--filter", "@agentic-polymarket/web", "start"],
+        nextBin,
+        ["start", "-p", "3000"],
         {
           MARKET_SERVICE_URL: "http://127.0.0.1:4003",
         },
+        path.join(repoRoot, "apps", "web"),
       ),
     );
     processes.push(
       startProcess(
         "observer-console",
-        "pnpm",
-        ["--filter", "@agentic-polymarket/observer-console", "start"],
+        nextBin,
+        ["start", "-p", "3001"],
         {
           PROPOSAL_PIPELINE_URL: "http://127.0.0.1:4005",
         },
+        path.join(repoRoot, "apps", "observer-console"),
       ),
     );
 
@@ -225,6 +342,15 @@ async function main() {
 
     if (!btcMarket || !fedMarket) {
       throw new Error(`Expected BTC and Fed markets, received ${JSON.stringify(markets.items)}`);
+    }
+
+    const proposalTitles = proposals.items.map((proposal) => proposal.title).sort();
+    if (
+      proposalTitles.length < 2 ||
+      !proposalTitles.some((title) => title.includes("BTC trade above $100k")) ||
+      !proposalTitles.some((title) => title.includes("Fed cut rates before July 31, 2026"))
+    ) {
+      throw new Error(`Unexpected proposal set: ${JSON.stringify(proposals.items)}`);
     }
 
     await waitForText("http://127.0.0.1:3000", "Will BTC trade above $100k by June 30, 2026?");
@@ -313,25 +439,76 @@ async function main() {
       throw new Error(`Expected quarantined resolution state: ${JSON.stringify(resolutions.items)}`);
     }
 
+    const marketCreator = processes.find((entry) => entry.name === "market-creator");
+    if (!marketCreator) {
+      throw new Error("market-creator process not found");
+    }
+    await stopProcess(marketCreator);
+
+    const proposalPipeline = processes.find((entry) => entry.name === "proposal-pipeline");
+    const marketService = processes.find((entry) => entry.name === "market-service");
+    const resolutionService = processes.find((entry) => entry.name === "resolution-service");
+
+    if (!proposalPipeline || !marketService || !resolutionService) {
+      throw new Error("Missing persisted service process for restart validation");
+    }
+
+    await stopProcess(proposalPipeline);
+    await stopProcess(marketService);
+    await stopProcess(resolutionService);
+
+    restartProcess(processes, marketService);
+    restartProcess(processes, proposalPipeline);
+    restartProcess(processes, resolutionService);
+
+    await waitForJson("http://127.0.0.1:4003/health");
+    await waitForJson("http://127.0.0.1:4005/health");
+    await waitForJson("http://127.0.0.1:4006/health");
+
+    const persistedProposals = (await waitForJson("http://127.0.0.1:4005/v1/proposals")) as {
+      items: Array<{ status: string; title: string }>;
+    };
+    if (
+      persistedProposals.items.length < 2 ||
+      !persistedProposals.items.every((proposal) => proposal.status === "published")
+    ) {
+      throw new Error(`Proposals were not persisted across restart: ${JSON.stringify(persistedProposals.items)}`);
+    }
+
+    const persistedMarkets = (await waitForJson("http://127.0.0.1:4003/v1/markets")) as {
+      items: Array<{ id: string; title: string }>;
+    };
+    if (
+      persistedMarkets.items.length < 2 ||
+      !persistedMarkets.items.some((market) => market.id === btcMarket.id) ||
+      !persistedMarkets.items.some((market) => market.id === fedMarket.id)
+    ) {
+      throw new Error(`Markets were not persisted across restart: ${JSON.stringify(persistedMarkets.items)}`);
+    }
+
+    const persistedResolutions = (await waitForJson("http://127.0.0.1:4006/v1/resolutions")) as {
+      items: Array<{ market_id: string; status: string; final_outcome: string | null }>;
+    };
+    const persistedBtcResolution = persistedResolutions.items.find((entry) => entry.market_id === btcMarket.id);
+    const persistedFedResolution = persistedResolutions.items.find((entry) => entry.market_id === fedMarket.id);
+    if (
+      !persistedBtcResolution ||
+      persistedBtcResolution.status !== "finalized" ||
+      persistedBtcResolution.final_outcome !== "YES"
+    ) {
+      throw new Error(`Finalized resolution was not persisted: ${JSON.stringify(persistedResolutions.items)}`);
+    }
+    if (!persistedFedResolution || persistedFedResolution.status !== "quarantined") {
+      throw new Error(`Quarantined resolution was not persisted: ${JSON.stringify(persistedResolutions.items)}`);
+    }
+
+    await waitForText("http://127.0.0.1:3000", "Will BTC trade above $100k by June 30, 2026?");
+    await waitForText("http://127.0.0.1:3001/proposals", "Will the Fed cut rates before July 31, 2026?");
+
     console.log("live-test ok");
   } finally {
     await Promise.all(
-      processes.map(
-        ({ child }) =>
-          new Promise<void>((resolve) => {
-            if (child.exitCode !== null) {
-              resolve();
-              return;
-            }
-            child.once("exit", () => resolve());
-            child.kill("SIGTERM");
-            setTimeout(() => {
-              if (child.exitCode === null) {
-                child.kill("SIGKILL");
-              }
-            }, 1000);
-          }),
-      ),
+      processes.map((process) => stopProcess(process)),
     );
 
     await new Promise<void>((resolve, reject) => {
@@ -343,6 +520,7 @@ async function main() {
         resolve();
       });
     });
+    await rm(databaseDirectory, { recursive: true, force: true });
   }
 }
 

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
+import { createDatabasePool, ensureCoreSchema, parseJsonField, toIsoTimestamp } from "@agentic-polymarket/persistence";
 import type { ResolutionKind, ResolutionMetadata } from "@agentic-polymarket/sdk-types";
 
 type Proposal = {
@@ -24,11 +25,156 @@ type Proposal = {
   created_at: string;
 };
 
+type ProposalRow = {
+  id: string;
+  proposer_agent_id: string;
+  title: string;
+  category: string;
+  close_time: unknown;
+  resolution_criteria: string;
+  source_of_truth_url: string;
+  resolution_kind: ResolutionKind;
+  resolution_metadata: unknown;
+  dedupe_key: string;
+  origin: Proposal["origin"];
+  signal_source_id: string | null;
+  signal_source_type: Proposal["signal_source_type"] | null;
+  status: Proposal["status"];
+  confidence_score: number;
+  observation_count: number;
+  autonomy_note: string;
+  linked_market_id: string | null;
+  created_at: unknown;
+};
+
 const port = Number(process.env.PROPOSAL_PIPELINE_PORT ?? 4005);
 const app = Fastify({ logger: true });
-const proposals = new Map<string, Proposal>();
-const proposalsByDedupeKey = new Map<string, Proposal>();
+const pool = createDatabasePool();
 const marketServiceUrl = process.env.MARKET_SERVICE_URL ?? "http://localhost:4003";
+
+function mapProposalRow(row: ProposalRow): Proposal {
+  return {
+    id: row.id,
+    proposer_agent_id: row.proposer_agent_id,
+    title: row.title,
+    category: row.category,
+    close_time: toIsoTimestamp(row.close_time),
+    resolution_criteria: row.resolution_criteria,
+    source_of_truth_url: row.source_of_truth_url,
+    resolution_kind: row.resolution_kind,
+    resolution_metadata: parseJsonField<ResolutionMetadata>(row.resolution_metadata),
+    dedupe_key: row.dedupe_key,
+    origin: row.origin,
+    signal_source_id: row.signal_source_id ?? undefined,
+    signal_source_type: row.signal_source_type ?? undefined,
+    status: row.status,
+    confidence_score: Number(row.confidence_score),
+    observation_count: Number(row.observation_count),
+    autonomy_note: row.autonomy_note,
+    linked_market_id: row.linked_market_id ?? undefined,
+    created_at: toIsoTimestamp(row.created_at),
+  };
+}
+
+async function getProposalByDedupeKey(dedupeKey: string) {
+  const result = await pool.query<ProposalRow>(
+    `
+      SELECT *
+      FROM proposals
+      WHERE dedupe_key = $1
+    `,
+    [dedupeKey],
+  );
+
+  return result.rowCount ? mapProposalRow(result.rows[0]) : null;
+}
+
+async function getProposalById(proposalId: string) {
+  const result = await pool.query<ProposalRow>(
+    `
+      SELECT *
+      FROM proposals
+      WHERE id = $1
+    `,
+    [proposalId],
+  );
+
+  return result.rowCount ? mapProposalRow(result.rows[0]) : null;
+}
+
+async function saveProposal(proposal: Proposal) {
+  const result = await pool.query<ProposalRow>(
+    `
+      INSERT INTO proposals (
+        id,
+        proposer_agent_id,
+        title,
+        category,
+        close_time,
+        resolution_criteria,
+        source_of_truth_url,
+        resolution_kind,
+        resolution_metadata,
+        dedupe_key,
+        origin,
+        signal_source_id,
+        signal_source_type,
+        status,
+        confidence_score,
+        observation_count,
+        autonomy_note,
+        linked_market_id,
+        created_at
+      )
+      VALUES (
+        $1, $2, $3, $4, $5::timestamptz, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::timestamptz
+      )
+      ON CONFLICT (id) DO UPDATE SET
+        proposer_agent_id = EXCLUDED.proposer_agent_id,
+        title = EXCLUDED.title,
+        category = EXCLUDED.category,
+        close_time = EXCLUDED.close_time,
+        resolution_criteria = EXCLUDED.resolution_criteria,
+        source_of_truth_url = EXCLUDED.source_of_truth_url,
+        resolution_kind = EXCLUDED.resolution_kind,
+        resolution_metadata = EXCLUDED.resolution_metadata,
+        dedupe_key = EXCLUDED.dedupe_key,
+        origin = EXCLUDED.origin,
+        signal_source_id = EXCLUDED.signal_source_id,
+        signal_source_type = EXCLUDED.signal_source_type,
+        status = EXCLUDED.status,
+        confidence_score = EXCLUDED.confidence_score,
+        observation_count = EXCLUDED.observation_count,
+        autonomy_note = EXCLUDED.autonomy_note,
+        linked_market_id = EXCLUDED.linked_market_id,
+        created_at = EXCLUDED.created_at
+      RETURNING *
+    `,
+    [
+      proposal.id,
+      proposal.proposer_agent_id,
+      proposal.title,
+      proposal.category,
+      proposal.close_time,
+      proposal.resolution_criteria,
+      proposal.source_of_truth_url,
+      proposal.resolution_kind,
+      JSON.stringify(proposal.resolution_metadata),
+      proposal.dedupe_key,
+      proposal.origin,
+      proposal.signal_source_id ?? null,
+      proposal.signal_source_type ?? null,
+      proposal.status,
+      proposal.confidence_score,
+      proposal.observation_count,
+      proposal.autonomy_note,
+      proposal.linked_market_id ?? null,
+      proposal.created_at,
+    ],
+  );
+
+  return mapProposalRow(result.rows[0]);
+}
 
 app.get("/health", async () => ({ service: "proposal-pipeline", status: "ok" }));
 
@@ -142,7 +288,7 @@ async function publishMarketFromProposal(proposal: Proposal) {
 
 async function maybePublishQueuedProposal(proposal: Proposal) {
   if (proposal.status !== "queued") {
-    return;
+    return proposal;
   }
 
   const adjustedConfidence = Math.min(1, proposal.confidence_score + (proposal.observation_count - 1) * 0.12);
@@ -151,7 +297,7 @@ async function maybePublishQueuedProposal(proposal: Proposal) {
   if (adjustedConfidence < 0.8) {
     proposal.autonomy_note =
       "Queued for autonomous republication until repeated signals raise confidence above the publication threshold.";
-    return;
+    return proposal;
   }
 
   try {
@@ -163,6 +309,8 @@ async function maybePublishQueuedProposal(proposal: Proposal) {
     proposal.status = "suppressed";
     proposal.autonomy_note = `Suppressed because market publication failed: ${String(error)}`;
   }
+
+  return proposal;
 }
 
 app.post("/v1/market-proposals", async (request, reply) => {
@@ -184,12 +332,13 @@ app.post("/v1/market-proposals", async (request, reply) => {
   const dedupeKey =
     body.dedupe_key ??
     `${body.category ?? "uncategorized"}:${body.title ?? "Untitled proposal"}:${body.close_time ?? ""}`;
-  const existing = proposalsByDedupeKey.get(dedupeKey);
+  const existing = await getProposalByDedupeKey(dedupeKey);
   if (existing) {
     existing.observation_count += 1;
     await maybePublishQueuedProposal(existing);
+    const savedProposal = await saveProposal(existing);
     return {
-      ...existing,
+      ...savedProposal,
       deduped: true,
     };
   }
@@ -232,18 +381,17 @@ app.post("/v1/market-proposals", async (request, reply) => {
     }
   }
 
-  proposals.set(proposal.id, proposal);
-  proposalsByDedupeKey.set(proposal.dedupe_key, proposal);
+  const savedProposal = await saveProposal(proposal);
   reply.code(201);
   return {
-    ...proposal,
+    ...savedProposal,
     deduped: false,
   };
 });
 
 app.get("/v1/market-proposals/:proposalId", async (request, reply) => {
   const proposalId = (request.params as { proposalId: string }).proposalId;
-  const proposal = proposals.get(proposalId);
+  const proposal = await getProposalById(proposalId);
   if (!proposal) {
     reply.code(404);
     return { error: "proposal_not_found" };
@@ -251,11 +399,26 @@ app.get("/v1/market-proposals/:proposalId", async (request, reply) => {
   return proposal;
 });
 
-app.get("/v1/proposals", async () => ({
-  items: [...proposals.values()],
-}));
+app.get("/v1/proposals", async () => {
+  const result = await pool.query<ProposalRow>(
+    `
+      SELECT *
+      FROM proposals
+      ORDER BY created_at DESC, id DESC
+    `,
+  );
 
-app.listen({ port, host: "0.0.0.0" }).catch((error) => {
+  return {
+    items: result.rows.map(mapProposalRow),
+  };
+});
+
+async function start() {
+  await ensureCoreSchema(pool);
+  await app.listen({ port, host: "0.0.0.0" });
+}
+
+void start().catch((error) => {
   app.log.error(error);
   process.exit(1);
 });

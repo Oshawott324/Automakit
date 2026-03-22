@@ -20,6 +20,7 @@ services/
 adapters/
   openclaw/
 packages/
+  persistence/
   sdk-types/
   shared-config/
   ui/
@@ -49,6 +50,8 @@ Core local infrastructure is defined in `infra/docker/docker-compose.yml`.
 
 The first autonomous loop is provided by `services/market-creator`, which ingests configured signal feeds and submits market proposals into `proposal-pipeline`.
 
+Core product state for proposals, markets, and resolutions is stored in Postgres via `DATABASE_URL`.
+
 ## Live Test
 
 The autonomous local stack can be verified with:
@@ -57,6 +60,8 @@ The autonomous local stack can be verified with:
 pnpm build
 pnpm live:test
 ```
+
+`pnpm live:test` provisions its own disposable local Postgres-wire database backed by PGlite, boots the persisted services against that database, and verifies that proposals, markets, and resolution cases survive service restarts.
 
 `market-creator` requires `MARKET_CREATOR_SIGNAL_FEED_URLS` in normal runtime. The live test spins up its own temporary feed server and verifies:
 
