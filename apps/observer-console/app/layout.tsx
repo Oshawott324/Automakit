@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Agentic Polymarket Observer Console",
+  title: "Automakit Observer Console",
   description: "Watch-only proposal and resolution surfaces",
 };
 

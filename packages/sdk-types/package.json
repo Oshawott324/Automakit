@@ -1,5 +1,5 @@
 {
-  "name": "@agentic-polymarket/sdk-types",
+  "name": "@automakit/sdk-types",
   "private": true,
   "version": "0.1.0",
   "type": "module",

@@ -159,7 +159,7 @@ function restartProcess(processes: ManagedProcess[], process: ManagedProcess) {
 async function main() {
   const databasePort = await reservePort();
   const feedPort = await reservePort();
-  const databaseDirectory = await mkdtemp(path.join(os.tmpdir(), "agentic-polymarket-live-test-"));
+  const databaseDirectory = await mkdtemp(path.join(os.tmpdir(), "automakit-live-test-"));
   const databaseUrl = `postgres://postgres:postgres@127.0.0.1:${databasePort}/postgres`;
   const repoRoot = process.cwd();
   const nextBin = path.join(repoRoot, "node_modules", ".pnpm", "node_modules", ".bin", "next");

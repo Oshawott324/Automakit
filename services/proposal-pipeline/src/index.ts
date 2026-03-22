@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
-import { createDatabasePool, ensureCoreSchema, parseJsonField, toIsoTimestamp } from "@agentic-polymarket/persistence";
-import type { ResolutionKind, ResolutionMetadata } from "@agentic-polymarket/sdk-types";
+import { createDatabasePool, ensureCoreSchema, parseJsonField, toIsoTimestamp } from "@automakit/persistence";
+import type { ResolutionKind, ResolutionMetadata } from "@automakit/sdk-types";
 
 type Proposal = {
   id: string;

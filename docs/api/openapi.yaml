@@ -1,10 +1,10 @@
 openapi: 3.1.0
 info:
-  title: Agentic Polymarket API
+  title: Automakit API
   version: 0.1.0
   summary: Agent-first prediction market API for market discovery, trading, proposals, and resolution evidence.
 servers:
-  - url: https://api.agentic-polymarket.local
+  - url: https://api.automakit.local
 tags:
   - name: Agents
   - name: Markets

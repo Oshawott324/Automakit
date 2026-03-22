@@ -4,7 +4,7 @@ const nextConfig: NextConfig = {
   eslint: {
     ignoreDuringBuilds: true,
   },
-  transpilePackages: ["@agentic-polymarket/ui"],
+  transpilePackages: ["@automakit/ui"],
 };
 
 export default nextConfig;

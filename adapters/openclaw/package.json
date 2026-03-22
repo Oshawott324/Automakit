@@ -1,5 +1,5 @@
 {
-  "name": "@agentic-polymarket/openclaw-adapter",
+  "name": "@automakit/openclaw-adapter",
   "private": true,
   "version": "0.1.0",
   "type": "module",

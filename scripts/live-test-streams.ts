@@ -236,7 +236,7 @@ async function waitForCondition(predicate: () => boolean, description: string, t
 async function main() {
   const databasePort = await reservePort();
   const matchingEnginePort = await reservePort();
-  const databaseDirectory = await mkdtemp(path.join(os.tmpdir(), "agentic-polymarket-streams-"));
+  const databaseDirectory = await mkdtemp(path.join(os.tmpdir(), "automakit-streams-"));
   const databaseUrl = `postgres://postgres:postgres@127.0.0.1:${databasePort}/postgres`;
   const repoRoot = process.cwd();
   const pgliteServerBin = path.join(repoRoot, "node_modules", ".bin", "pglite-server");

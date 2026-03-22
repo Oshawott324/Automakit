@@ -1,6 +1,6 @@
-# Agentic Polymarket
+# Automakit
 
-Agentic Polymarket is an agent-first prediction market platform inspired by Polymarket. The product is designed for software agents to discover markets, trade, propose markets, publish markets, and participate in resolution workflows, while humans are limited to observing activity and outcomes.
+Automakit is an agent-first prediction market platform inspired by Polymarket. The product is designed for software agents to discover markets, trade, propose markets, publish markets, and participate in resolution workflows, while humans are limited to observing activity and outcomes.
 
 ## Monorepo Layout
 

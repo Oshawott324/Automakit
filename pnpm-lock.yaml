@@ -43,7 +43,7 @@ importers:
 
   apps/observer-console:
     dependencies:
-      '@agentic-polymarket/ui':
+      '@automakit/ui':
         specifier: workspace:*
         version: link:../../packages/ui
       next:
@@ -58,7 +58,7 @@ importers:
 
   apps/web:
     dependencies:
-      '@agentic-polymarket/ui':
+      '@automakit/ui':
         specifier: workspace:*
         version: link:../../packages/ui
       next:
@@ -89,7 +89,7 @@ importers:
 
   services/agent-gateway:
     dependencies:
-      '@agentic-polymarket/persistence':
+      '@automakit/persistence':
         specifier: workspace:*
         version: link:../../packages/persistence
       fastify:
@@ -104,7 +104,7 @@ importers:
 
   services/auth-registry:
     dependencies:
-      '@agentic-polymarket/persistence':
+      '@automakit/persistence':
         specifier: workspace:*
         version: link:../../packages/persistence
       fastify:
@@ -113,16 +113,16 @@ importers:
 
   services/market-creator:
     dependencies:
-      '@agentic-polymarket/sdk-types':
+      '@automakit/sdk-types':
         specifier: workspace:*
         version: link:../../packages/sdk-types
 
   services/market-service:
     dependencies:
-      '@agentic-polymarket/persistence':
+      '@automakit/persistence':
         specifier: workspace:*
         version: link:../../packages/persistence
-      '@agentic-polymarket/sdk-types':
+      '@automakit/sdk-types':
         specifier: workspace:*
         version: link:../../packages/sdk-types
       fastify:
@@ -131,7 +131,7 @@ importers:
 
   services/portfolio-service:
     dependencies:
-      '@agentic-polymarket/persistence':
+      '@automakit/persistence':
         specifier: workspace:*
         version: link:../../packages/persistence
       fastify:
@@ -140,10 +140,10 @@ importers:
 
   services/proposal-pipeline:
     dependencies:
-      '@agentic-polymarket/persistence':
+      '@automakit/persistence':
         specifier: workspace:*
         version: link:../../packages/persistence
-      '@agentic-polymarket/sdk-types':
+      '@automakit/sdk-types':
         specifier: workspace:*
         version: link:../../packages/sdk-types
       fastify:
@@ -152,10 +152,10 @@ importers:
 
   services/resolution-service:
     dependencies:
-      '@agentic-polymarket/persistence':
+      '@automakit/persistence':
         specifier: workspace:*
         version: link:../../packages/persistence
-      '@agentic-polymarket/sdk-types':
+      '@automakit/sdk-types':
         specifier: workspace:*
         version: link:../../packages/sdk-types
       fastify:
@@ -164,7 +164,7 @@ importers:
 
   services/stream-service:
     dependencies:
-      '@agentic-polymarket/persistence':
+      '@automakit/persistence':
         specifier: workspace:*
         version: link:../../packages/persistence
       fastify:

@@ -166,7 +166,7 @@ Responsibilities:
 
 Responsibilities:
 
-- Map Agentic Polymarket APIs into OpenClaw-compatible operations.
+- Map Automakit APIs into OpenClaw-compatible operations.
 - Translate market subscriptions and order workflows.
 - Normalize errors and capability negotiation.
 

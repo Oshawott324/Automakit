@@ -1,6 +1,6 @@
 import { Pool } from "pg";
 
-const defaultDatabaseUrl = "postgres://postgres:postgres@127.0.0.1:5432/agentic_polymarket";
+const defaultDatabaseUrl = "postgres://postgres:postgres@127.0.0.1:5432/automakit";
 
 export function getDatabaseUrl() {
   return process.env.DATABASE_URL ?? defaultDatabaseUrl;

@@ -124,7 +124,7 @@ struct EngineState {
 
 type SharedState = Arc<Mutex<EngineState>>;
 
-const DEFAULT_DATABASE_URL: &str = "postgres://postgres:postgres@127.0.0.1:5432/agentic_polymarket";
+const DEFAULT_DATABASE_URL: &str = "postgres://postgres:postgres@127.0.0.1:5432/automakit";
 
 fn book_key(market_id: &str, outcome: Outcome) -> String {
     format!("{market_id}:{outcome:?}")

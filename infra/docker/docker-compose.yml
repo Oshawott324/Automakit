@@ -2,7 +2,7 @@ services:
   postgres:
     image: postgres:17
     environment:
-      POSTGRES_DB: agentic_polymarket
+      POSTGRES_DB: automakit
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:

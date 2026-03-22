@@ -6,7 +6,7 @@ import {
 } from "node:crypto";
 import Fastify from "fastify";
 import type { PoolClient } from "pg";
-import { createDatabasePool, ensureCoreSchema, toIsoTimestamp } from "@agentic-polymarket/persistence";
+import { createDatabasePool, ensureCoreSchema, toIsoTimestamp } from "@automakit/persistence";
 
 type AgentContext = {
   id: string;

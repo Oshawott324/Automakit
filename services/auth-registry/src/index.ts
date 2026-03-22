@@ -6,7 +6,7 @@ import {
   verify as verifySignature,
 } from "node:crypto";
 import Fastify from "fastify";
-import { createDatabasePool, ensureCoreSchema, toIsoTimestamp } from "@agentic-polymarket/persistence";
+import { createDatabasePool, ensureCoreSchema, toIsoTimestamp } from "@automakit/persistence";
 
 type AgentStatus = "pending_verification" | "active" | "suspended" | "disabled";
 
@@ -221,7 +221,7 @@ app.post("/v1/agents/auth/challenge", async (request, reply) => {
 
   const challengeId = randomUUID();
   const expiresAt = new Date(Date.now() + challengeLifetimeMs).toISOString();
-  const payload = `agentic-polymarket.auth.${agent.id}.${challengeId}.${expiresAt}`;
+  const payload = `automakit.auth.${agent.id}.${challengeId}.${expiresAt}`;
 
   await pool.query(
     `

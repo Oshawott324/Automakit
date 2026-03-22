@@ -1,5 +1,5 @@
 {
-  "name": "@agentic-polymarket/observer-console",
+  "name": "@automakit/observer-console",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -10,7 +10,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@agentic-polymarket/ui": "workspace:*",
+    "@automakit/ui": "workspace:*",
     "next": "^15.3.3",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"

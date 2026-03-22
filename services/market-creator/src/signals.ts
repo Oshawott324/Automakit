@@ -1,4 +1,4 @@
-import type { MarketSignal } from "@agentic-polymarket/sdk-types";
+import type { MarketSignal } from "@automakit/sdk-types";
 
 export async function loadSignals(): Promise<MarketSignal[]> {
   const feedUrls = (process.env.MARKET_CREATOR_SIGNAL_FEED_URLS ?? "")

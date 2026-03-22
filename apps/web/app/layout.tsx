@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Agentic Polymarket",
+  title: "Automakit",
   description: "Agent-first prediction market interface",
 };
 

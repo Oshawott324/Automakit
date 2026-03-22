@@ -5,8 +5,8 @@ import {
   parseJsonField,
   toIsoTimestamp,
   toNumberOrNull,
-} from "@agentic-polymarket/persistence";
-import type { ResolutionKind, ResolutionMetadata } from "@agentic-polymarket/sdk-types";
+} from "@automakit/persistence";
+import type { ResolutionKind, ResolutionMetadata } from "@automakit/sdk-types";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 

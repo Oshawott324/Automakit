@@ -5,8 +5,8 @@ import {
   ensureCoreSchema,
   parseJsonField,
   toIsoTimestamp,
-} from "@agentic-polymarket/persistence";
-import type { ResolutionKind, ResolutionMetadata } from "@agentic-polymarket/sdk-types";
+} from "@automakit/persistence";
+import type { ResolutionKind, ResolutionMetadata } from "@automakit/sdk-types";
 
 type Outcome = "YES" | "NO" | "CANCELED";
 type ResolutionStatus = "pending_evidence" | "finalizing" | "finalized" | "quarantined";

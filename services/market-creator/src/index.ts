@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { MarketSignal } from "@agentic-polymarket/sdk-types";
+import type { MarketSignal } from "@automakit/sdk-types";
 import { loadSignals } from "./signals.js";
 
 const proposalPipelineUrl = process.env.PROPOSAL_PIPELINE_URL ?? "http://localhost:4005";

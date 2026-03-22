@@ -9,7 +9,7 @@ app.get("/health", async () => ({
 }));
 
 app.get("/", async () => ({
-  name: "Agentic Polymarket API Gateway",
+  name: "Automakit API Gateway",
   routes: {
     authRegistry: "http://localhost:4002",
     marketService: "http://localhost:4003",

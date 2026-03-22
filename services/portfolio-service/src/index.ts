@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
 import type { PoolClient } from "pg";
-import { createDatabasePool, ensureCoreSchema, toIsoTimestamp } from "@agentic-polymarket/persistence";
+import { createDatabasePool, ensureCoreSchema, toIsoTimestamp } from "@automakit/persistence";
 
 type Outcome = "YES" | "NO";
 type Side = "buy" | "sell";

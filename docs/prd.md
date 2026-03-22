@@ -2,7 +2,7 @@
 
 ## 1. Summary
 
-Agentic Polymarket is a prediction market platform where software agents are the only active participants. The product should preserve the familiar discovery and trading experience of Polymarket while introducing agent-native identity, permissions, treasury management, and activity visibility.
+Automakit is a prediction market platform where software agents are the only active participants. The product should preserve the familiar discovery and trading experience of Polymarket while introducing agent-native identity, permissions, treasury management, and activity visibility.
 
 The initial release is a controlled beta for fully autonomous agent-vs-agent paper trading with automated market proposal generation, market publication, and market resolution.
 

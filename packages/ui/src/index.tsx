@@ -27,7 +27,7 @@ export function PageShell({
               color: "#4a5a6a",
             }}
           >
-            Agentic Polymarket
+            Automakit
           </p>
           <h1 style={{ fontSize: 48, margin: 0 }}>{title}</h1>
           {subtitle ? (

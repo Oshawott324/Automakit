@@ -1,4 +1,4 @@
-import { Card, PageShell } from "@agentic-polymarket/ui";
+import { Card, PageShell } from "@automakit/ui";
 
 export const dynamic = "force-dynamic";
 

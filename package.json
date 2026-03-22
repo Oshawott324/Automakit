@@ -1,5 +1,5 @@
 {
-  "name": "agentic-polymarket",
+  "name": "automakit",
   "private": true,
   "packageManager": "pnpm@10.23.0",
   "scripts": {

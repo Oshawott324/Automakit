@@ -5,7 +5,7 @@ import {
   parseJsonField,
   toIsoTimestamp,
   toNumberOrNull,
-} from "@agentic-polymarket/persistence";
+} from "@automakit/persistence";
 import { WebSocketServer } from "ws";
 
 type AgentContext = {
