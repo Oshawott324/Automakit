@@ -241,6 +241,51 @@ async function cancelAtMatchingEngine(body: {
   return (await response.json()) as { order_id: string; canceled: boolean };
 }
 
+async function appendAcceptedOrderEvent(
+  client: PoolClient,
+  event: {
+    order_id: string;
+    agent_id: string;
+    market_id: string;
+    side: Side;
+    outcome: Outcome;
+    price: number;
+    size: number;
+    created_at: string;
+  },
+) {
+  await client.query(
+    `
+      INSERT INTO order_events (
+        event_id,
+        event_type,
+        order_id,
+        market_id,
+        agent_id,
+        side,
+        outcome,
+        price,
+        size,
+        created_at
+      )
+      VALUES (
+        $1, 'accepted', $2, $3, $4, $5, $6, $7, $8, $9::timestamptz
+      )
+    `,
+    [
+      randomUUID(),
+      event.order_id,
+      event.market_id,
+      event.agent_id,
+      event.side,
+      event.outcome,
+      event.price,
+      event.size,
+      event.created_at,
+    ],
+  );
+}
+
 async function insertFillsAndUpdateMarketStats(client: PoolClient, fills: MatchingFill[]) {
   if (fills.length === 0) {
     return;
@@ -280,6 +325,35 @@ async function insertFillsAndUpdateMarketStats(client: PoolClient, fills: Matchi
       ],
     );
 
+    await client.query(
+      `
+        INSERT INTO order_events (
+          event_id,
+          event_type,
+          market_id,
+          outcome,
+          price,
+          size,
+          buy_order_id,
+          sell_order_id,
+          created_at
+        )
+        VALUES (
+          $1, 'fill', $2, $3, $4, $5, $6, $7, $8::timestamptz
+        )
+      `,
+      [
+        randomUUID(),
+        fill.market_id,
+        fill.outcome,
+        fill.price,
+        fill.size,
+        fill.buy_order_id,
+        fill.sell_order_id,
+        fill.executed_at,
+      ],
+    );
+
     const lastTradedYesPrice = fill.outcome === "YES" ? fill.price : 1 - fill.price;
     await client.query(
       `
@@ -292,6 +366,38 @@ async function insertFillsAndUpdateMarketStats(client: PoolClient, fills: Matchi
       [fill.market_id, lastTradedYesPrice, fill.size],
     );
   }
+}
+
+async function appendCanceledOrderEvent(client: PoolClient, order: OrderRow) {
+  await client.query(
+    `
+      INSERT INTO order_events (
+        event_id,
+        event_type,
+        order_id,
+        market_id,
+        agent_id,
+        side,
+        outcome,
+        price,
+        size,
+        created_at
+      )
+      VALUES (
+        $1, 'canceled', $2, $3, $4, $5, $6, $7, $8, NOW()
+      )
+    `,
+    [
+      randomUUID(),
+      order.id,
+      order.market_id,
+      order.agent_id,
+      order.side,
+      order.outcome,
+      Number(order.price),
+      Math.max(Number(order.size) - Number(order.filled_size), 0),
+    ],
+  );
 }
 
 app.get("/health", async () => ({ service: "agent-gateway", status: "ok" }));
@@ -491,6 +597,7 @@ app.post("/v1/orders", async (request, reply) => {
   }
 
   const orderId = randomUUID();
+  const orderCreatedAt = new Date().toISOString();
   let matchingResult: MatchingSubmitResponse;
   try {
     matchingResult = await submitToMatchingEngine({
@@ -501,7 +608,7 @@ app.post("/v1/orders", async (request, reply) => {
       outcome: body.outcome,
       price: body.price,
       size: body.size,
-      created_at: new Date().toISOString(),
+      created_at: orderCreatedAt,
     });
   } catch (error) {
     reply.code(502);
@@ -559,10 +666,21 @@ app.post("/v1/orders", async (request, reply) => {
         takerUpdate.status,
         signedTimestamp,
         requestSignature,
-        new Date().toISOString(),
-        new Date().toISOString(),
+        orderCreatedAt,
+        orderCreatedAt,
       ],
     );
+
+    await appendAcceptedOrderEvent(client, {
+      order_id: orderId,
+      agent_id: agent.id,
+      market_id: body.market_id,
+      side: body.side,
+      outcome: body.outcome,
+      price: body.price,
+      size: body.size,
+      created_at: orderCreatedAt,
+    });
 
     for (const update of matchingResult.touched_orders) {
       if (update.order_id === orderId) {
@@ -654,14 +772,25 @@ app.post("/v1/orders/cancel", async (request, reply) => {
     return { error: "order_not_cancelable_in_matching_engine" };
   }
 
-  await pool.query(
-    `
-      UPDATE orders
-      SET status = 'canceled', canceled_at = NOW(), updated_at = NOW()
-      WHERE id = $1
-    `,
-    [order.id],
-  );
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `
+        UPDATE orders
+        SET status = 'canceled', canceled_at = NOW(), updated_at = NOW()
+        WHERE id = $1
+      `,
+      [order.id],
+    );
+    await appendCanceledOrderEvent(client, order);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 
   reply.code(202);
   return { status: "accepted" };

@@ -209,6 +209,7 @@ async function main() {
   const pgliteServerBin = path.join(repoRoot, "node_modules", ".bin", "pglite-server");
 
   const processes: ManagedProcess[] = [];
+  let matchingEngineProcess: ManagedProcess | null = null;
   try {
     processes.push(
       startProcess(
@@ -219,15 +220,17 @@ async function main() {
     );
     await waitForDatabase(databaseUrl);
 
-    processes.push(
-      startProcess(
-        "matching-engine",
-        "cargo",
-        ["run", "--manifest-path", "services/matching-engine/Cargo.toml"],
-        { MATCHING_ENGINE_PORT: String(matchingEnginePort) },
-        repoRoot,
-      ),
+    matchingEngineProcess = startProcess(
+      "matching-engine",
+      "cargo",
+      ["run", "--manifest-path", "services/matching-engine/Cargo.toml"],
+      {
+        MATCHING_ENGINE_PORT: String(matchingEnginePort),
+        DATABASE_URL: databaseUrl,
+      },
+      repoRoot,
     );
+    processes.push(matchingEngineProcess);
     processes.push(
       startProcess(
         "market-service",
@@ -318,6 +321,20 @@ async function main() {
     if (makerOrderAck.status !== "open" || makerOrderAck.filled_size !== 0) {
       throw new Error(`Unexpected maker order ack: ${JSON.stringify(makerOrderAck)}`);
     }
+
+    await stopProcess(matchingEngineProcess);
+    matchingEngineProcess = startProcess(
+      "matching-engine-restart",
+      "cargo",
+      ["run", "--manifest-path", "services/matching-engine/Cargo.toml"],
+      {
+        MATCHING_ENGINE_PORT: String(matchingEnginePort),
+        DATABASE_URL: databaseUrl,
+      },
+      repoRoot,
+    );
+    processes.push(matchingEngineProcess);
+    await waitForJson(`http://127.0.0.1:${matchingEnginePort}/health`);
 
     const takerOrderBody = {
       market_id: market.id,
@@ -486,6 +503,27 @@ async function main() {
     ).json()) as { reserved_balance: number };
     if (reservedAfterCancel.reserved_balance !== 0) {
       throw new Error(`Expected zero reserved balance after cancel: ${JSON.stringify(reservedAfterCancel)}`);
+    }
+
+    const verificationPool = new Pool({ connectionString: databaseUrl });
+    try {
+      const eventCounts = await verificationPool.query<{ event_type: string; count: string }>(
+        `
+          SELECT event_type, COUNT(*)::text AS count
+          FROM order_events
+          GROUP BY event_type
+          ORDER BY event_type ASC
+        `,
+      );
+      const counts = Object.fromEntries(
+        eventCounts.rows.map((row) => [row.event_type, Number(row.count)]),
+      ) as Record<string, number>;
+
+      if (counts.accepted !== 3 || counts.fill !== 1 || counts.canceled !== 1) {
+        throw new Error(`Unexpected order event log counts: ${JSON.stringify(counts)}`);
+      }
+    } finally {
+      await verificationPool.end();
     }
 
     console.log("live-test-agent-auth ok");

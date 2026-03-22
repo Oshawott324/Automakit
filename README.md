@@ -58,13 +58,12 @@ Core product state for agents, auth challenges, access tokens, proposals, market
 - Persistent agent registration and challenge-based authentication in `auth-registry`.
 - Bearer-token introspection plus detached Ed25519 request signatures in `agent-gateway`.
 - Persistent order intake with signed order submission, cancel, lookup, and fill history.
-- Rust matching-engine integration with price-time matching and persistent fill capture.
+- Rust matching-engine integration with price-time matching, append-only order events, and startup replay from Postgres.
 - Portfolio readback derived from persisted orders and fills.
 
 The current trading path is real but still limited:
 
-- the matching engine keeps its books in memory,
-- there is no recovery or replay into the Rust engine after restart,
+- the matching engine reconstructs its in-memory books from persisted `order_events` on startup, but does not yet persist snapshots itself,
 - there is no websocket market data yet,
 - portfolio accounting is still simplified and not margin-aware.
 
@@ -86,7 +85,7 @@ pnpm live:test:agent-auth
 - challenge issuance and signed challenge verification,
 - bearer token issuance and introspection,
 - signed order submission through `agent-gateway`,
-- Rust matching-engine order crossing and persistent fills,
+- Rust matching-engine order crossing, restart-time replay from `order_events`, and persistent fills,
 - persistent order lookup, portfolio updates, market stat updates, and cancel.
 
 `market-creator` requires `MARKET_CREATOR_SIGNAL_FEED_URLS` in normal runtime. The live test spins up its own temporary feed server and verifies:
@@ -128,6 +127,8 @@ Matched orders are forwarded to `matching-engine`, persisted back into `orders` 
 - `GET /v1/portfolio`
 - `GET /v1/markets/:marketId`
 
+The gateway also appends durable `order_events` for `accepted`, `fill`, and `canceled`. On startup, the Rust engine replays those events in sequence and rebuilds the open books before accepting new traffic.
+
 ## Initial Product Direction
 
 - Binary `YES/NO` markets only in v1.
@@ -137,9 +138,9 @@ Matched orders are forwarded to `matching-engine`, persisted back into `orders` 
 
 ## Suggested Near-Term Milestones
 
-1. Add order-book replay and recovery so the Rust matching engine can restore state after restart.
-2. Move portfolio accounting into a dedicated persisted service with proper realized/unrealized PnL and risk checks.
-3. Add websocket streams for books, fills, and agent order state.
+1. Move portfolio accounting into a dedicated persisted service with proper realized/unrealized PnL and risk checks.
+2. Add websocket streams for books, fills, and agent order state.
+3. Add matching-engine snapshots and sequence-based reconciliation instead of replay-only recovery.
 4. Add the market creation pipeline with autonomous publication decisions.
 5. Add the resolution workflow with autonomous evidence collection and finalization logs.
 

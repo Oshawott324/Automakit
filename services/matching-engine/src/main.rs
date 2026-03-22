@@ -12,6 +12,7 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::Mutex;
+use tokio_postgres::{error::SqlState, NoTls, Row};
 use uuid::Uuid;
 
 #[derive(Clone, Serialize)]
@@ -123,6 +124,8 @@ struct EngineState {
 
 type SharedState = Arc<Mutex<EngineState>>;
 
+const DEFAULT_DATABASE_URL: &str = "postgres://postgres:postgres@127.0.0.1:5432/agentic_polymarket";
+
 fn book_key(market_id: &str, outcome: Outcome) -> String {
     format!("{market_id}:{outcome:?}")
 }
@@ -153,6 +156,197 @@ fn sort_resting_orders(orders: &mut [RestingOrder], side: Side) {
                 .then(left.sequence.cmp(&right.sequence))
         }),
     }
+}
+
+fn side_from_str(value: &str) -> Option<Side> {
+    match value {
+        "buy" => Some(Side::Buy),
+        "sell" => Some(Side::Sell),
+        _ => None,
+    }
+}
+
+fn outcome_from_str(value: &str) -> Option<Outcome> {
+    match value {
+        "YES" => Some(Outcome::YES),
+        "NO" => Some(Outcome::NO),
+        _ => None,
+    }
+}
+
+fn insert_resting_order(
+    engine: &mut EngineState,
+    market_id: &str,
+    outcome: Outcome,
+    side: Side,
+    order: RestingOrder,
+) {
+    let book = engine.books.entry(book_key(market_id, outcome)).or_default();
+    let resting_orders = match side {
+        Side::Buy => &mut book.buy_orders,
+        Side::Sell => &mut book.sell_orders,
+    };
+
+    if resting_orders.iter().any(|existing| existing.order_id == order.order_id) {
+        return;
+    }
+
+    resting_orders.push(order);
+    sort_resting_orders(resting_orders, side);
+}
+
+fn reduce_resting_order(orders: &mut Vec<RestingOrder>, order_id: &str, matched_size: f64) {
+    if let Some(order) = orders.iter_mut().find(|entry| entry.order_id == order_id) {
+        order.remaining_size = (order.remaining_size - matched_size).max(0.0);
+    }
+    orders.retain(|entry| entry.remaining_size > f64::EPSILON);
+}
+
+fn replay_event_row(engine: &mut EngineState, row: &Row) {
+    let sequence_id = row.get::<_, i64>("sequence_id").max(0) as u64;
+    engine.sequence = engine.sequence.max(sequence_id.saturating_add(1));
+
+    let event_type = row.get::<_, String>("event_type");
+    let market_id = row.get::<_, String>("market_id");
+    let outcome = match outcome_from_str(&row.get::<_, String>("outcome")) {
+        Some(value) => value,
+        None => return,
+    };
+
+    match event_type.as_str() {
+        "accepted" => {
+            let order_id = match row.get::<_, Option<String>>("order_id") {
+                Some(value) => value,
+                None => return,
+            };
+            let agent_id = match row.get::<_, Option<String>>("agent_id") {
+                Some(value) => value,
+                None => return,
+            };
+            let side = match row
+                .get::<_, Option<String>>("side")
+                .and_then(|value| side_from_str(&value))
+            {
+                Some(value) => value,
+                None => return,
+            };
+            let price = match row.get::<_, Option<f64>>("price") {
+                Some(value) => value,
+                None => return,
+            };
+            let size = match row.get::<_, Option<f64>>("size") {
+                Some(value) => value,
+                None => return,
+            };
+
+            if size <= f64::EPSILON {
+                return;
+            }
+
+            insert_resting_order(
+                engine,
+                &market_id,
+                outcome,
+                side,
+                RestingOrder {
+                    order_id,
+                    agent_id,
+                    price,
+                    original_size: size,
+                    remaining_size: size,
+                    sequence: sequence_id,
+                },
+            );
+        }
+        "fill" => {
+            let buy_order_id = match row.get::<_, Option<String>>("buy_order_id") {
+                Some(value) => value,
+                None => return,
+            };
+            let sell_order_id = match row.get::<_, Option<String>>("sell_order_id") {
+                Some(value) => value,
+                None => return,
+            };
+            let matched_size = match row.get::<_, Option<f64>>("size") {
+                Some(value) => value,
+                None => return,
+            };
+
+            let book = match engine.books.get_mut(&book_key(&market_id, outcome)) {
+                Some(value) => value,
+                None => return,
+            };
+
+            reduce_resting_order(&mut book.buy_orders, &buy_order_id, matched_size);
+            reduce_resting_order(&mut book.sell_orders, &sell_order_id, matched_size);
+        }
+        "canceled" => {
+            let order_id = match row.get::<_, Option<String>>("order_id") {
+                Some(value) => value,
+                None => return,
+            };
+            let side = match row
+                .get::<_, Option<String>>("side")
+                .and_then(|value| side_from_str(&value))
+            {
+                Some(value) => value,
+                None => return,
+            };
+            let book = match engine.books.get_mut(&book_key(&market_id, outcome)) {
+                Some(value) => value,
+                None => return,
+            };
+            let resting_orders = match side {
+                Side::Buy => &mut book.buy_orders,
+                Side::Sell => &mut book.sell_orders,
+            };
+            resting_orders.retain(|entry| entry.order_id != order_id);
+        }
+        _ => {}
+    }
+}
+
+async fn load_state_from_event_log(database_url: &str) -> Result<EngineState, tokio_postgres::Error> {
+    let (client, connection) = tokio_postgres::connect(database_url, NoTls).await?;
+    tokio::spawn(async move {
+        if let Err(error) = connection.await {
+            eprintln!("matching-engine database connection error: {error}");
+        }
+    });
+
+    let rows = match client
+        .query(
+            "
+              SELECT
+                sequence_id,
+                event_type,
+                order_id,
+                market_id,
+                agent_id,
+                side,
+                outcome,
+                price,
+                size,
+                buy_order_id,
+                sell_order_id
+              FROM order_events
+              ORDER BY sequence_id ASC
+            ",
+            &[],
+        )
+        .await
+    {
+        Ok(value) => value,
+        Err(error) if error.code() == Some(&SqlState::UNDEFINED_TABLE) => return Ok(EngineState::default()),
+        Err(error) => return Err(error),
+    };
+
+    let mut state = EngineState::default();
+    for row in rows.iter() {
+        replay_event_row(&mut state, row);
+    }
+
+    Ok(state)
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -320,7 +514,13 @@ async fn cancel_order(
 
 #[tokio::main]
 async fn main() {
-    let state: SharedState = Arc::new(Mutex::new(EngineState::default()));
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_string());
+    let recovered_state = load_state_from_event_log(&database_url)
+        .await
+        .expect("load matching-engine state from order_events");
+    let recovered_books = recovered_state.books.len();
+    let recovered_sequence = recovered_state.sequence;
+    let state: SharedState = Arc::new(Mutex::new(recovered_state));
     let app = Router::new()
         .route("/health", get(health))
         .route("/v1/internal/orders", post(submit_order))
@@ -334,6 +534,10 @@ async fn main() {
     let address = SocketAddr::from(([0, 0, 0, 0], port));
 
     println!("matching-engine listening on {}", address);
+    println!(
+        "matching-engine recovered {} books with next sequence {}",
+        recovered_books, recovered_sequence
+    );
 
     let listener = tokio::net::TcpListener::bind(address)
         .await

@@ -140,6 +140,25 @@ export async function ensureCoreSchema(pool: Pool) {
       executed_at TIMESTAMPTZ NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS order_events (
+      sequence_id BIGSERIAL PRIMARY KEY,
+      event_id TEXT NOT NULL UNIQUE,
+      event_type TEXT NOT NULL,
+      order_id TEXT,
+      market_id TEXT NOT NULL REFERENCES markets(id) ON DELETE RESTRICT,
+      agent_id TEXT REFERENCES agents(id) ON DELETE RESTRICT,
+      side TEXT,
+      outcome TEXT NOT NULL,
+      price DOUBLE PRECISION,
+      size DOUBLE PRECISION,
+      buy_order_id TEXT,
+      sell_order_id TEXT,
+      created_at TIMESTAMPTZ NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_order_events_market_sequence
+      ON order_events (market_id, sequence_id);
+
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS filled_size DOUBLE PRECISION NOT NULL DEFAULT 0;
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
   `);
