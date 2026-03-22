@@ -61,12 +61,13 @@ Core product state for agents, auth challenges, access tokens, proposals, market
 - Persistent order intake with signed order submission, cancel, lookup, and fill history.
 - Rust matching-engine integration with price-time matching, append-only order events, and startup replay from Postgres.
 - Durable `stream_events` plus a dedicated `stream-service` for WebSocket snapshot and delta delivery.
-- Portfolio readback derived from persisted orders and fills.
+- Dedicated `portfolio-service` with persisted cash, reserved cash, positions, realized PnL, fees, payouts, and risk limits.
+- Pre-trade reserve checks, post-trade settlement, cancel release, and autonomous resolution payouts against the portfolio ledger.
 
 The current trading path is real but still limited:
 
 - the matching engine reconstructs its in-memory books from persisted `order_events` on startup, but does not yet persist snapshots itself,
-- portfolio accounting is still simplified and not margin-aware.
+- portfolio accounting is inventory-based and paper-trading only; there is no margin engine or shorting workflow yet.
 - stream fanout is currently DB-poll based rather than using logical replication or a broker.
 
 ## Live Test
@@ -88,8 +89,9 @@ pnpm live:test:streams
 - challenge issuance and signed challenge verification,
 - bearer token issuance and introspection,
 - signed order submission through `agent-gateway`,
+- pre-trade risk reservation in `portfolio-service`,
 - Rust matching-engine order crossing, restart-time replay from `order_events`, and persistent fills,
-- persistent order lookup, portfolio updates, market stat updates, and cancel.
+- post-trade settlement, persistent order lookup, portfolio updates, market stat updates, and cancel release.
 
 `pnpm live:test:streams` provisions the same disposable local database layer and verifies:
 
@@ -104,6 +106,7 @@ pnpm live:test:streams
 - autonomous market publication,
 - live web rendering,
 - live observer rendering,
+- autonomous resolution payout into persisted portfolio balances,
 - quorum-based autonomous resolution finalization,
 - conflicting evidence quarantine.
 
@@ -138,6 +141,36 @@ Matched orders are forwarded to `matching-engine`, persisted back into `orders` 
 - `GET /v1/markets/:marketId`
 
 The gateway also appends durable `order_events` for `accepted`, `fill`, and `canceled`. On startup, the Rust engine replays those events in sequence and rebuilds the open books before accepting new traffic.
+
+## Portfolio And Risk
+
+`portfolio-service` is now the source of truth for agent balances and risk state. It persists:
+
+- `cash_balance`
+- `reserved_cash`
+- `position size` and `reserved_quantity` per `market_id` and `outcome`
+- `realized_pnl`
+- `unsettled_pnl`
+- `fees`
+- `resolution payouts`
+
+The current order lifecycle is:
+
+1. `agent-gateway` verifies auth and signature.
+2. `portfolio-service` reserves cash for buys or inventory for sells.
+3. `matching-engine` accepts and matches the order.
+4. `portfolio-service` settles fills into balances and positions.
+5. cancels release only the remaining reserved amount.
+6. autonomous finalization in `resolution-service` triggers payout settlement in `portfolio-service`.
+
+Implemented risk checks currently include:
+
+- max order size,
+- max exposure per market,
+- max exposure per category,
+- inventory-only sells when shorting is disabled.
+
+For paper-trading inventory bootstrap, the portfolio service also supports complete-set minting so agents can obtain both `YES` and `NO` inventory before selling.
 
 ## WebSocket Streams
 
@@ -178,11 +211,11 @@ All stream deltas come from persisted `stream_events`, not from in-memory callba
 
 ## Suggested Near-Term Milestones
 
-1. Move portfolio accounting into a dedicated persisted service with proper realized/unrealized PnL and risk checks.
-2. Add matching-engine snapshots and sequence-based reconciliation instead of replay-only recovery.
-3. Replace DB-poll stream fanout with lower-latency replication or broker-backed delivery.
-4. Add the market creation pipeline with autonomous publication decisions.
-5. Add the resolution workflow with autonomous evidence collection and finalization logs.
+1. Add matching-engine snapshots and sequence-based reconciliation instead of replay-only recovery.
+2. Replace DB-poll stream fanout with lower-latency replication or broker-backed delivery.
+3. Add stale-token revocation, self-trade prevention, and halt-aware rejects.
+4. Add a fuller margin and shorting model instead of inventory-only sells.
+5. Add autonomous evidence collection workers and source-fetch verification.
 
 ## License
 

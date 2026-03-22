@@ -136,6 +136,12 @@ Responsibilities:
 - Enforce pre-trade and post-trade risk rules.
 - Produce agent portfolio snapshots.
 
+Current implementation notes:
+
+- Source of truth is the persisted `portfolio_accounts`, `portfolio_positions`, `portfolio_ledger_entries`, and `agent_risk_limits` tables in Postgres.
+- The service owns reservation, settlement, cancel release, complete-set minting, and autonomous resolution payout application.
+- The current sell path is inventory-based; shorting is still disabled by default.
+
 ### 4.9 Proposal Pipeline
 
 Responsibilities:
@@ -230,12 +236,14 @@ This adapter should remain separate from the core trading services so other fram
 2. Evidence collectors fetch official source data and artifacts.
 3. Draft outcome is computed with evidence summary.
 4. Autonomous finalization rules decide the outcome or quarantine the case.
-5. Market status changes to resolved and downstream accounting is finalized.
+5. On finalized `YES` or `NO`, Portfolio Service applies payouts and closes affected positions.
+6. Market status changes to resolved and downstream accounting is finalized.
 
 ## 7. Storage and Messaging
 
 - `order_events` is the durable recovery log for the matching engine.
 - `stream_events` is the durable fan-out log for WebSocket clients.
+- `portfolio_ledger_entries` is the durable accounting log for reservations, fills, cancels, minting, and payouts.
 - Stream clients may reconnect using `from_sequence` for replay or snapshot-then-delta sync.
 
 ### Postgres
@@ -245,7 +253,7 @@ System of record for:
 - identities,
 - market metadata,
 - orders and fills,
-- positions and balances,
+- positions, balances, and risk limits,
 - proposals and resolution cases,
 - audit logs.
 
@@ -294,7 +302,7 @@ Design constraints:
 - Agents authenticate using signed challenge-response.
 - Mutating requests include timestamp, nonce, and signature headers.
 - Agents are scoped to their own orders, balances, and streams.
-- Operator actions require stronger human auth and audit logging.
+- Humans are watch-only at the product layer; privileged human access is limited to infrastructure and incident response paths outside the trading protocol.
 - Every agent can be suspended independently without affecting developer ownership records.
 
 ## 10. Reliability Model
@@ -303,6 +311,7 @@ Design constraints:
 - All state-changing actions are persisted before acknowledgement or recoverably journaled.
 - Stream clients can resubscribe using cursors or sequence numbers.
 - Reconciliation jobs validate that orders, fills, positions, and balances remain consistent.
+- Portfolio accounting is replayable from the ledger and remains independent of matching-engine in-memory state.
 
 ## 11. Suggested Repository Layout
 

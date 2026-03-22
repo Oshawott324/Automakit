@@ -69,6 +69,7 @@ const port = Number(process.env.RESOLUTION_SERVICE_PORT ?? 4006);
 const app = Fastify({ logger: true });
 const pool = createDatabasePool();
 const marketServiceUrl = process.env.MARKET_SERVICE_URL ?? "http://localhost:4003";
+const portfolioServiceUrl = process.env.PORTFOLIO_SERVICE_URL ?? "http://localhost:4004";
 const quorumThreshold = Number(process.env.RESOLUTION_QUORUM_THRESHOLD ?? 2);
 
 async function appendStreamEvent(event: {
@@ -95,6 +96,25 @@ async function appendStreamEvent(event: {
       event.created_at ?? new Date().toISOString(),
     ],
   );
+}
+
+async function applyResolutionPayout(marketId: string, finalOutcome: "YES" | "NO") {
+  const response = await fetch(`${portfolioServiceUrl}/v1/internal/resolutions/payout`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      market_id: marketId,
+      final_outcome: finalOutcome,
+    }),
+  });
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    body: (await response.json()) as Record<string, unknown>,
+  };
 }
 
 function mapResolutionEvidenceRow(row: ResolutionEvidenceRow): ResolutionEvidence {
@@ -438,6 +458,14 @@ app.post("/v1/resolution-evidence", async (request, reply) => {
   resolutionCase.evidence = await getResolutionEvidence(marketId);
   updateResolutionCaseState(resolutionCase);
   await saveResolutionCase(resolutionCase);
+  const finalOutcome = resolutionCase.final_outcome;
+  if ((resolutionCase.status as ResolutionStatus) === "finalized" && finalOutcome && finalOutcome !== "CANCELED") {
+    const payoutResult = await applyResolutionPayout(marketId, finalOutcome);
+    if (!payoutResult.ok) {
+      reply.code(502);
+      return { error: "portfolio_resolution_payout_failed", details: payoutResult.body };
+    }
+  }
   await appendStreamEvent({
     market_id: marketId,
     payload: {

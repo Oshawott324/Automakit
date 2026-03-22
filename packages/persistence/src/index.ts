@@ -178,6 +178,64 @@ export async function ensureCoreSchema(pool: Pool) {
     CREATE INDEX IF NOT EXISTS idx_stream_events_agent_sequence
       ON stream_events (agent_id, sequence_id);
 
+    CREATE TABLE IF NOT EXISTS portfolio_accounts (
+      agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+      cash_balance DOUBLE PRECISION NOT NULL,
+      reserved_cash DOUBLE PRECISION NOT NULL,
+      realized_pnl DOUBLE PRECISION NOT NULL,
+      unsettled_pnl DOUBLE PRECISION NOT NULL,
+      fees DOUBLE PRECISION NOT NULL,
+      payouts DOUBLE PRECISION NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS portfolio_positions (
+      agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      market_id TEXT NOT NULL REFERENCES markets(id) ON DELETE CASCADE,
+      outcome TEXT NOT NULL,
+      market_category TEXT NOT NULL,
+      quantity DOUBLE PRECISION NOT NULL,
+      reserved_quantity DOUBLE PRECISION NOT NULL,
+      cost_basis_notional DOUBLE PRECISION NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL,
+      PRIMARY KEY (agent_id, market_id, outcome)
+    );
+
+    CREATE TABLE IF NOT EXISTS portfolio_ledger_entries (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      market_id TEXT REFERENCES markets(id) ON DELETE CASCADE,
+      outcome TEXT,
+      entry_type TEXT NOT NULL,
+      cash_delta DOUBLE PRECISION NOT NULL,
+      reserved_cash_delta DOUBLE PRECISION NOT NULL,
+      position_delta DOUBLE PRECISION NOT NULL,
+      reserved_position_delta DOUBLE PRECISION NOT NULL,
+      cost_basis_notional_delta DOUBLE PRECISION NOT NULL,
+      realized_pnl_delta DOUBLE PRECISION NOT NULL,
+      unsettled_pnl_delta DOUBLE PRECISION NOT NULL,
+      fees_delta DOUBLE PRECISION NOT NULL,
+      payouts_delta DOUBLE PRECISION NOT NULL,
+      reference_type TEXT NOT NULL,
+      reference_id TEXT NOT NULL,
+      metadata JSONB NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL,
+      UNIQUE (reference_type, reference_id, agent_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_portfolio_ledger_agent_created
+      ON portfolio_ledger_entries (agent_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS agent_risk_limits (
+      agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+      max_order_size DOUBLE PRECISION NOT NULL,
+      max_market_exposure DOUBLE PRECISION NOT NULL,
+      max_category_exposure DOUBLE PRECISION NOT NULL,
+      allow_shorting BOOLEAN NOT NULL,
+      cancel_on_disconnect BOOLEAN NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL
+    );
+
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS filled_size DOUBLE PRECISION NOT NULL DEFAULT 0;
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
   `);

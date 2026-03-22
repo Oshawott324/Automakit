@@ -317,24 +317,18 @@ async function getFillSnapshots(marketId?: string) {
 }
 
 async function getPortfolioSnapshot(agentId: string) {
-  const [reservedResult, notionalResult, positionsResult] = await Promise.all([
-    pool.query<{ reserved_balance: unknown }>(
+  const [accountResult, positionsResult] = await Promise.all([
+    pool.query<{
+      cash_balance: unknown;
+      reserved_cash: unknown;
+      realized_pnl: unknown;
+      fees: unknown;
+      payouts: unknown;
+    }>(
       `
-        SELECT COALESCE(SUM(price * GREATEST(size - filled_size, 0)), 0) AS reserved_balance
-        FROM orders
+        SELECT cash_balance, reserved_cash, realized_pnl, fees, payouts
+        FROM portfolio_accounts
         WHERE agent_id = $1
-          AND side = 'buy'
-          AND status IN ('open', 'partially_filled')
-      `,
-      [agentId],
-    ),
-    pool.query<{ buy_notional: unknown; sell_notional: unknown }>(
-      `
-        SELECT
-          COALESCE(SUM(CASE WHEN buy_agent_id = $1 THEN price * size ELSE 0 END), 0) AS buy_notional,
-          COALESCE(SUM(CASE WHEN sell_agent_id = $1 THEN price * size ELSE 0 END), 0) AS sell_notional
-        FROM fills
-        WHERE buy_agent_id = $1 OR sell_agent_id = $1
       `,
       [agentId],
     ),
@@ -342,52 +336,64 @@ async function getPortfolioSnapshot(agentId: string) {
       market_id: string;
       outcome: Outcome;
       quantity: unknown;
-      bought_qty: unknown;
-      bought_notional: unknown;
+      reserved_quantity: unknown;
+      cost_basis_notional: unknown;
       mark_price_yes: unknown;
+      final_outcome: unknown;
     }>(
       `
         SELECT
-          f.market_id,
-          f.outcome,
-          SUM(CASE WHEN f.buy_agent_id = $1 THEN f.size ELSE -f.size END) AS quantity,
-          SUM(CASE WHEN f.buy_agent_id = $1 THEN f.size ELSE 0 END) AS bought_qty,
-          SUM(CASE WHEN f.buy_agent_id = $1 THEN f.price * f.size ELSE 0 END) AS bought_notional,
-          MAX(m.last_traded_price_yes) AS mark_price_yes
-        FROM fills f
-        JOIN markets m ON m.id = f.market_id
-        WHERE f.buy_agent_id = $1 OR f.sell_agent_id = $1
-        GROUP BY f.market_id, f.outcome
-        HAVING SUM(CASE WHEN f.buy_agent_id = $1 THEN f.size ELSE -f.size END) <> 0
+          p.market_id,
+          p.outcome,
+          p.quantity,
+          p.reserved_quantity,
+          p.cost_basis_notional,
+          m.last_traded_price_yes AS mark_price_yes,
+          rc.final_outcome
+        FROM portfolio_positions p
+        JOIN markets m ON m.id = p.market_id
+        LEFT JOIN resolution_cases rc ON rc.market_id = p.market_id
+        WHERE p.agent_id = $1
+          AND p.quantity > 0
       `,
       [agentId],
     ),
   ]);
 
-  const defaultCashBalance = Number(process.env.AGENT_DEFAULT_CASH_BALANCE ?? 100000);
-  const reservedBalance = Number(reservedResult.rows[0]?.reserved_balance ?? 0);
-  const buyNotional = Number(notionalResult.rows[0]?.buy_notional ?? 0);
-  const sellNotional = Number(notionalResult.rows[0]?.sell_notional ?? 0);
+  const account = accountResult.rows[0];
+  let unrealizedPnl = 0;
+  const positions = positionsResult.rows.map((row) => {
+    const quantity = Number(row.quantity);
+    const averagePrice = quantity > 0 ? Number(row.cost_basis_notional) / quantity : 0;
+    let markPriceYes = Number(row.mark_price_yes ?? 0);
+    if (row.final_outcome === "YES") {
+      markPriceYes = 1;
+    } else if (row.final_outcome === "NO") {
+      markPriceYes = 0;
+    }
+    const markPrice = row.outcome === "YES" ? markPriceYes : 1 - markPriceYes;
+    const unrealized = quantity * (markPrice - averagePrice);
+    unrealizedPnl += unrealized;
+    return {
+      market_id: row.market_id,
+      outcome: row.outcome,
+      quantity,
+      reserved_quantity: Number(row.reserved_quantity),
+      average_price: averagePrice,
+      mark_price: markPrice,
+      unrealized_pnl: unrealized,
+    };
+  });
 
   return {
     agent_id: agentId,
-    cash_balance: defaultCashBalance - buyNotional + sellNotional - reservedBalance,
-    reserved_balance: reservedBalance,
-    realized_pnl: 0,
-    unrealized_pnl: 0,
-    positions: positionsResult.rows.map((row) => {
-      const quantity = Number(row.quantity);
-      const boughtQty = Number(row.bought_qty);
-      const boughtNotional = Number(row.bought_notional);
-      const markPriceYes = Number(row.mark_price_yes ?? 0);
-      return {
-        market_id: row.market_id,
-        outcome: row.outcome,
-        quantity,
-        average_price: boughtQty > 0 ? boughtNotional / boughtQty : 0,
-        mark_price: row.outcome === "YES" ? markPriceYes : 1 - markPriceYes,
-      };
-    }),
+    cash_balance: Number(account?.cash_balance ?? 0),
+    reserved_balance: Number(account?.reserved_cash ?? 0),
+    realized_pnl: Number(account?.realized_pnl ?? 0),
+    unrealized_pnl: unrealizedPnl,
+    fees: Number(account?.fees ?? 0),
+    payouts: Number(account?.payouts ?? 0),
+    positions,
   };
 }
 

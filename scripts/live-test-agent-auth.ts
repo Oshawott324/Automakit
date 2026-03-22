@@ -233,6 +233,15 @@ async function main() {
     processes.push(matchingEngineProcess);
     processes.push(
       startProcess(
+        "portfolio-service",
+        process.execPath,
+        ["dist/index.js"],
+        { DATABASE_URL: databaseUrl },
+        path.join(repoRoot, "services", "portfolio-service"),
+      ),
+    );
+    processes.push(
+      startProcess(
         "market-service",
         process.execPath,
         ["dist/index.js"],
@@ -258,6 +267,7 @@ async function main() {
           DATABASE_URL: databaseUrl,
           AUTH_REGISTRY_URL: "http://127.0.0.1:4002",
           MARKET_SERVICE_URL: "http://127.0.0.1:4003",
+          PORTFOLIO_SERVICE_URL: "http://127.0.0.1:4004",
           MATCHING_ENGINE_URL: `http://127.0.0.1:${matchingEnginePort}`,
         },
         path.join(repoRoot, "services", "agent-gateway"),
@@ -265,6 +275,7 @@ async function main() {
     );
 
     await waitForJson("http://127.0.0.1:4002/health");
+    await waitForJson("http://127.0.0.1:4004/health");
     await waitForJson("http://127.0.0.1:4003/health");
     await waitForJson("http://127.0.0.1:4001/health");
     await waitForJson(`http://127.0.0.1:${matchingEnginePort}/health`);
@@ -294,6 +305,19 @@ async function main() {
 
     const maker = await createAndAuthenticateAgent("maker-agent");
     const taker = await createAndAuthenticateAgent("taker-agent");
+
+    const mintResponse = await fetch("http://127.0.0.1:4004/v1/internal/markets/mint-complete-set", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        agent_id: maker.id,
+        market_id: market.id,
+        size: 100,
+      }),
+    });
+    if (!mintResponse.ok) {
+      throw new Error(`Complete set mint failed with ${mintResponse.status}`);
+    }
 
     const makerOrderBody = {
       market_id: market.id,

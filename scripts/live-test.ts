@@ -237,6 +237,17 @@ async function main() {
 
     processes.push(
       startProcess(
+        "portfolio-service",
+        process.execPath,
+        ["dist/index.js"],
+        {
+          DATABASE_URL: databaseUrl,
+        },
+        path.join(repoRoot, "services", "portfolio-service"),
+      ),
+    );
+    processes.push(
+      startProcess(
         "market-service",
         process.execPath,
         ["dist/index.js"],
@@ -265,6 +276,8 @@ async function main() {
         ["dist/index.js"],
         {
           DATABASE_URL: databaseUrl,
+          MARKET_SERVICE_URL: "http://127.0.0.1:4003",
+          PORTFOLIO_SERVICE_URL: "http://127.0.0.1:4004",
         },
         path.join(repoRoot, "services", "resolution-service"),
       ),
@@ -306,6 +319,7 @@ async function main() {
     );
 
     await waitForJson("http://127.0.0.1:4003/health");
+    await waitForJson("http://127.0.0.1:4004/health");
     await waitForJson("http://127.0.0.1:4005/health");
     await waitForJson("http://127.0.0.1:4006/health");
     await waitForText("http://127.0.0.1:3000", "Markets");
@@ -462,6 +476,7 @@ async function main() {
     restartProcess(processes, resolutionService);
 
     await waitForJson("http://127.0.0.1:4003/health");
+    await waitForJson("http://127.0.0.1:4004/health");
     await waitForJson("http://127.0.0.1:4005/health");
     await waitForJson("http://127.0.0.1:4006/health");
 

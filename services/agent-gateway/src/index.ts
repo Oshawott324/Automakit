@@ -72,9 +72,10 @@ type PortfolioPositionRow = {
   market_id: string;
   outcome: Outcome;
   quantity: unknown;
-  bought_qty: unknown;
-  bought_notional: unknown;
+  reserved_quantity: unknown;
+  cost_basis_notional: unknown;
   mark_price_yes: unknown;
+  final_outcome: unknown;
 };
 
 type PortfolioSnapshot = {
@@ -83,12 +84,16 @@ type PortfolioSnapshot = {
   reserved_balance: number;
   realized_pnl: number;
   unrealized_pnl: number;
+  fees: number;
+  payouts: number;
   positions: Array<{
     market_id: string;
     outcome: Outcome;
     quantity: number;
+    reserved_quantity: number;
     average_price: number;
     mark_price: number;
+    unrealized_pnl: number;
   }>;
 };
 
@@ -130,8 +135,8 @@ declare module "fastify" {
 const port = Number(process.env.AGENT_GATEWAY_PORT ?? 4001);
 const authRegistryUrl = process.env.AUTH_REGISTRY_URL ?? "http://localhost:4002";
 const marketServiceUrl = process.env.MARKET_SERVICE_URL ?? "http://localhost:4003";
+const portfolioServiceUrl = process.env.PORTFOLIO_SERVICE_URL ?? "http://localhost:4004";
 const matchingEngineUrl = process.env.MATCHING_ENGINE_URL ?? "http://localhost:7400";
-const defaultCashBalance = Number(process.env.AGENT_DEFAULT_CASH_BALANCE ?? 100000);
 const maxSignatureAgeMs = Number(process.env.AGENT_REQUEST_MAX_AGE_MS ?? 5 * 60_000);
 const app = Fastify({ logger: true });
 const pool = createDatabasePool();
@@ -262,72 +267,77 @@ async function getOrderbookSnapshot(client: Queryable, marketId: string) {
 }
 
 async function getPortfolioSnapshot(client: Queryable, agentId: string): Promise<PortfolioSnapshot> {
-  const [reservedResult, notionalResult, positionsResult] = await Promise.all([
-    client.query<{ reserved_balance: unknown }>(
+  const [accountResult, positionsResult] = await Promise.all([
+    client.query<{
+      cash_balance: unknown;
+      reserved_cash: unknown;
+      realized_pnl: unknown;
+      fees: unknown;
+      payouts: unknown;
+    }>(
       `
-        SELECT COALESCE(SUM(price * GREATEST(size - filled_size, 0)), 0) AS reserved_balance
-        FROM orders
+        SELECT cash_balance, reserved_cash, realized_pnl, fees, payouts
+        FROM portfolio_accounts
         WHERE agent_id = $1
-          AND side = 'buy'
-          AND status IN ('open', 'partially_filled')
-      `,
-      [agentId],
-    ),
-    client.query<{ buy_notional: unknown; sell_notional: unknown }>(
-      `
-        SELECT
-          COALESCE(SUM(CASE WHEN buy_agent_id = $1 THEN price * size ELSE 0 END), 0) AS buy_notional,
-          COALESCE(SUM(CASE WHEN sell_agent_id = $1 THEN price * size ELSE 0 END), 0) AS sell_notional
-        FROM fills
-        WHERE buy_agent_id = $1 OR sell_agent_id = $1
       `,
       [agentId],
     ),
     client.query<PortfolioPositionRow>(
       `
         SELECT
-          f.market_id,
-          f.outcome,
-          SUM(CASE WHEN f.buy_agent_id = $1 THEN f.size ELSE -f.size END) AS quantity,
-          SUM(CASE WHEN f.buy_agent_id = $1 THEN f.size ELSE 0 END) AS bought_qty,
-          SUM(CASE WHEN f.buy_agent_id = $1 THEN f.price * f.size ELSE 0 END) AS bought_notional,
-          MAX(m.last_traded_price_yes) AS mark_price_yes
-        FROM fills f
-        JOIN markets m ON m.id = f.market_id
-        WHERE f.buy_agent_id = $1 OR f.sell_agent_id = $1
-        GROUP BY f.market_id, f.outcome
-        HAVING SUM(CASE WHEN f.buy_agent_id = $1 THEN f.size ELSE -f.size END) <> 0
+          p.market_id,
+          p.outcome,
+          p.quantity,
+          p.reserved_quantity,
+          p.cost_basis_notional,
+          m.last_traded_price_yes AS mark_price_yes,
+          rc.final_outcome
+        FROM portfolio_positions p
+        JOIN markets m ON m.id = p.market_id
+        LEFT JOIN resolution_cases rc ON rc.market_id = p.market_id
+        WHERE p.agent_id = $1
+          AND p.quantity > 0
       `,
       [agentId],
     ),
   ]);
 
-  const reservedBalance = Number(reservedResult.rows[0]?.reserved_balance ?? 0);
-  const buyNotional = Number(notionalResult.rows[0]?.buy_notional ?? 0);
-  const sellNotional = Number(notionalResult.rows[0]?.sell_notional ?? 0);
-  const cashBalance = defaultCashBalance - buyNotional + sellNotional - reservedBalance;
+  const account = accountResult.rows[0];
+  let unrealizedPnl = 0;
+  const positions = positionsResult.rows.map((row) => {
+    const quantity = Number(row.quantity);
+    const costBasis = Number(row.cost_basis_notional);
+    const averagePrice = quantity > 0 ? costBasis / quantity : 0;
+    let markPriceYes = Number(row.mark_price_yes ?? 0);
+    if (row.final_outcome === "YES") {
+      markPriceYes = 1;
+    } else if (row.final_outcome === "NO") {
+      markPriceYes = 0;
+    }
+    const markPrice = row.outcome === "YES" ? markPriceYes : 1 - markPriceYes;
+    const unrealized = quantity * (markPrice - averagePrice);
+    unrealizedPnl += unrealized;
+
+    return {
+      market_id: row.market_id,
+      outcome: row.outcome,
+      quantity,
+      reserved_quantity: Number(row.reserved_quantity),
+      average_price: averagePrice,
+      mark_price: markPrice,
+      unrealized_pnl: unrealized,
+    };
+  });
 
   return {
     agent_id: agentId,
-    cash_balance: cashBalance,
-    reserved_balance: reservedBalance,
-    realized_pnl: 0,
-    unrealized_pnl: 0,
-    positions: positionsResult.rows.map((row) => {
-      const quantity = Number(row.quantity);
-      const boughtQty = Number(row.bought_qty);
-      const boughtNotional = Number(row.bought_notional);
-      const markPriceYes = Number(row.mark_price_yes ?? 0);
-      const markPrice = row.outcome === "YES" ? markPriceYes : 1 - markPriceYes;
-
-      return {
-        market_id: row.market_id,
-        outcome: row.outcome,
-        quantity,
-        average_price: boughtQty > 0 ? boughtNotional / boughtQty : 0,
-        mark_price: markPrice,
-      };
-    }),
+    cash_balance: Number(account?.cash_balance ?? 0),
+    reserved_balance: Number(account?.reserved_cash ?? 0),
+    realized_pnl: Number(account?.realized_pnl ?? 0),
+    unrealized_pnl: unrealizedPnl,
+    fees: Number(account?.fees ?? 0),
+    payouts: Number(account?.payouts ?? 0),
+    positions,
   };
 }
 
@@ -429,6 +439,85 @@ async function cancelAtMatchingEngine(body: {
   }
 
   return (await response.json()) as { order_id: string; canceled: boolean };
+}
+
+async function reserveAtPortfolioService(body: {
+  order_id: string;
+  agent_id: string;
+  market_id: string;
+  side: Side;
+  outcome: Outcome;
+  price: number;
+  size: number;
+}) {
+  const response = await fetch(`${portfolioServiceUrl}/v1/internal/orders/reserve`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    body: (await response.json()) as Record<string, unknown>,
+  };
+}
+
+async function settleAtPortfolioService(body: {
+  fills: Array<{
+    fill_id: string;
+    market_id: string;
+    outcome: Outcome;
+    price: number;
+    size: number;
+    buy_order_id: string;
+    sell_order_id: string;
+    buy_agent_id: string;
+    sell_agent_id: string;
+    buy_limit_price: number;
+    sell_limit_price: number;
+    executed_at: string;
+  }>;
+}) {
+  const response = await fetch(`${portfolioServiceUrl}/v1/internal/orders/settle`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    body: (await response.json()) as Record<string, unknown>,
+  };
+}
+
+async function cancelAtPortfolioService(body: {
+  order_id: string;
+  agent_id: string;
+  market_id: string;
+  outcome: Outcome;
+  side: Side;
+  price: number;
+  remaining_size: number;
+}) {
+  const response = await fetch(`${portfolioServiceUrl}/v1/internal/orders/cancel`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    body: (await response.json()) as Record<string, unknown>,
+  };
 }
 
 async function appendAcceptedOrderEvent(
@@ -712,6 +801,20 @@ app.post("/v1/orders", async (request, reply) => {
 
   const orderId = randomUUID();
   const orderCreatedAt = new Date().toISOString();
+  const reserveResult = await reserveAtPortfolioService({
+    order_id: orderId,
+    agent_id: agent.id,
+    market_id: body.market_id,
+    side: body.side,
+    outcome: body.outcome,
+    price: body.price,
+    size: body.size,
+  });
+  if (!reserveResult.ok) {
+    reply.code(reserveResult.status);
+    return reserveResult.body;
+  }
+
   let matchingResult: MatchingSubmitResponse;
   try {
     matchingResult = await submitToMatchingEngine({
@@ -725,11 +828,35 @@ app.post("/v1/orders", async (request, reply) => {
       created_at: orderCreatedAt,
     });
   } catch (error) {
+    await cancelAtPortfolioService({
+      order_id: orderId,
+      agent_id: agent.id,
+      market_id: body.market_id,
+      outcome: body.outcome,
+      side: body.side,
+      price: body.price,
+      remaining_size: body.size,
+    }).catch(() => undefined);
     reply.code(502);
     return { error: String(error) };
   }
 
   const client = await pool.connect();
+  const affectedAgentIds = new Set<string>([agent.id]);
+  let settlementPayload: Array<{
+    fill_id: string;
+    market_id: string;
+    outcome: Outcome;
+    price: number;
+    size: number;
+    buy_order_id: string;
+    sell_order_id: string;
+    buy_agent_id: string;
+    sell_agent_id: string;
+    buy_limit_price: number;
+    sell_limit_price: number;
+    executed_at: string;
+  }> = [];
   try {
     await client.query("BEGIN");
 
@@ -827,6 +954,11 @@ app.post("/v1/orders", async (request, reply) => {
     );
 
     const touchedOrders = touchedOrdersResult.rows.map(mapOrderRow);
+    const orderPriceById = new Map<string, number>();
+    for (const order of touchedOrders) {
+      orderPriceById.set(order.id, order.price);
+    }
+
     for (const order of touchedOrders) {
       await appendStreamEvent(client, {
         channel: "order.update",
@@ -838,6 +970,20 @@ app.post("/v1/orders", async (request, reply) => {
     }
 
     for (const fill of matchingResult.fills) {
+      settlementPayload.push({
+        fill_id: fill.fill_id,
+        market_id: fill.market_id,
+        outcome: fill.outcome,
+        price: fill.price,
+        size: fill.size,
+        buy_order_id: fill.buy_order_id,
+        sell_order_id: fill.sell_order_id,
+        buy_agent_id: fill.buy_agent_id,
+        sell_agent_id: fill.sell_agent_id,
+        buy_limit_price: orderPriceById.get(fill.buy_order_id) ?? body.price,
+        sell_limit_price: orderPriceById.get(fill.sell_order_id) ?? body.price,
+        executed_at: fill.executed_at,
+      });
       await appendStreamEvent(client, {
         channel: "trade.fill",
         market_id: fill.market_id,
@@ -867,7 +1013,6 @@ app.post("/v1/orders", async (request, reply) => {
       },
     });
 
-    const affectedAgentIds = new Set<string>([agent.id]);
     for (const order of touchedOrders) {
       affectedAgentIds.add(order.agent_id);
     }
@@ -875,21 +1020,29 @@ app.post("/v1/orders", async (request, reply) => {
       affectedAgentIds.add(fill.buy_agent_id);
       affectedAgentIds.add(fill.sell_agent_id);
     }
-
-    for (const affectedAgentId of affectedAgentIds) {
-      await appendStreamEvent(client, {
-        channel: "portfolio.update",
-        agent_id: affectedAgentId,
-        market_id: body.market_id,
-        payload: await getPortfolioSnapshot(client, affectedAgentId),
-      });
-    }
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
   } finally {
     client.release();
+  }
+
+  if (settlementPayload.length > 0) {
+    const settleResult = await settleAtPortfolioService({ fills: settlementPayload });
+    if (!settleResult.ok) {
+      reply.code(502);
+      return { error: "portfolio_settlement_failed", details: settleResult.body };
+    }
+  }
+
+  for (const affectedAgentId of affectedAgentIds) {
+    await appendStreamEvent(pool, {
+      channel: "portfolio.update",
+      agent_id: affectedAgentId,
+      market_id: body.market_id,
+      payload: await getPortfolioSnapshot(pool, affectedAgentId),
+    });
   }
 
   reply.code(202);
@@ -992,12 +1145,6 @@ app.post("/v1/orders/cancel", async (request, reply) => {
         touched_order_ids: [canceledOrder.id],
       },
     });
-    await appendStreamEvent(client, {
-      channel: "portfolio.update",
-      market_id: canceledOrder.market_id,
-      agent_id: canceledOrder.agent_id,
-      payload: await getPortfolioSnapshot(client, canceledOrder.agent_id),
-    });
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK");
@@ -1005,6 +1152,28 @@ app.post("/v1/orders/cancel", async (request, reply) => {
   } finally {
     client.release();
   }
+
+  const remainingSize = Math.max(Number(order.size) - Number(order.filled_size), 0);
+  const portfolioCancelResult = await cancelAtPortfolioService({
+    order_id: order.id,
+    agent_id: order.agent_id,
+    market_id: order.market_id,
+    outcome: order.outcome,
+    side: order.side,
+    price: Number(order.price),
+    remaining_size: remainingSize,
+  });
+  if (!portfolioCancelResult.ok) {
+    reply.code(502);
+    return { error: "portfolio_cancel_failed", details: portfolioCancelResult.body };
+  }
+
+  await appendStreamEvent(pool, {
+    channel: "portfolio.update",
+    market_id: order.market_id,
+    agent_id: order.agent_id,
+    payload: await getPortfolioSnapshot(pool, order.agent_id),
+  });
 
   reply.code(202);
   return { status: "accepted" };
