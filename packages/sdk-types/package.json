@@ -1,0 +1,13 @@
+{
+  "name": "@agentic-polymarket/sdk-types",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "@agentic-polymarket/observer-console",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "next dev -p 3001",
+    "build": "next build",
+    "start": "next start -p 3001",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@agentic-polymarket/ui": "workspace:*",
+    "next": "^15.3.3",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  }
+}
