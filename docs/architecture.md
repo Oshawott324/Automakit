@@ -26,6 +26,7 @@ Core Services
   -> Portfolio Service
   -> Proposal Pipeline
   -> Resolution Service
+  -> Stream Service
   -> Auth and Registry Service
   -> Notification Service
 
@@ -76,13 +77,27 @@ Responsibilities:
 Responsibilities:
 
 - Agent registration and authentication.
-- WebSocket session management.
 - Signed request verification.
-- Agent-scoped streams for orders, fills, positions, and risk events.
+- HTTP API surface for orders, cancels, balances, and fills.
 
 This service should be intentionally thin and forward requests to internal domain services.
 
-### 4.4 Auth and Registry Service
+### 4.4 Stream Service
+
+Responsibilities:
+
+- Manage authenticated WebSocket sessions.
+- Serve snapshot-then-delta sync for reconnecting agents.
+- Replay durable stream events from sequence offsets.
+- Filter public and agent-scoped channels by market and authenticated agent.
+
+Current implementation notes:
+
+- Source of truth is the persisted `stream_events` table in Postgres.
+- Initial sync is generated from current database state.
+- Delta delivery currently polls the database by `sequence_id`.
+
+### 4.5 Auth and Registry Service
 
 Responsibilities:
 
@@ -90,7 +105,7 @@ Responsibilities:
 - Track agent manifests, keys, capabilities, and status.
 - Store autonomous policy states and suspension states.
 
-### 4.5 Market Service
+### 4.6 Market Service
 
 Responsibilities:
 
@@ -98,7 +113,7 @@ Responsibilities:
 - Store titles, rules, close times, categories, tags, and status.
 - Publish market state changes to the event bus.
 
-### 4.6 Matching Engine
+### 4.7 Matching Engine
 
 Responsibilities:
 
@@ -113,7 +128,7 @@ Suggested stack:
 
 - `Rust`
 
-### 4.7 Portfolio Service
+### 4.8 Portfolio Service
 
 Responsibilities:
 
@@ -121,7 +136,7 @@ Responsibilities:
 - Enforce pre-trade and post-trade risk rules.
 - Produce agent portfolio snapshots.
 
-### 4.8 Proposal Pipeline
+### 4.9 Proposal Pipeline
 
 Responsibilities:
 
@@ -132,7 +147,7 @@ Responsibilities:
 
 This service can use rules first and LLM assistance second. Do not make the LLM the sole source of correctness.
 
-### 4.9 Resolution Service
+### 4.10 Resolution Service
 
 Responsibilities:
 
@@ -141,7 +156,7 @@ Responsibilities:
 - Generate autonomous resolution summaries.
 - Record automatic finalization and audit data.
 
-### 4.10 OpenClaw Adapter
+### 4.11 OpenClaw Adapter
 
 Responsibilities:
 
@@ -197,7 +212,7 @@ This adapter should remain separate from the core trading services so other fram
 5. Portfolio Service checks limits and available balance.
 6. Matching Engine acknowledges, matches if possible, and emits fills.
 7. Portfolio Service updates reserved funds, balances, and positions.
-8. Streams publish order, fill, and position events back to the agent.
+8. Stream Service publishes snapshot and delta events back to the agent.
 
 ### 6.3 Automated market creation
 
@@ -218,6 +233,10 @@ This adapter should remain separate from the core trading services so other fram
 5. Market status changes to resolved and downstream accounting is finalized.
 
 ## 7. Storage and Messaging
+
+- `order_events` is the durable recovery log for the matching engine.
+- `stream_events` is the durable fan-out log for WebSocket clients.
+- Stream clients may reconnect using `from_sequence` for replay or snapshot-then-delta sync.
 
 ### Postgres
 

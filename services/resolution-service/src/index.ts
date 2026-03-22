@@ -71,6 +71,32 @@ const pool = createDatabasePool();
 const marketServiceUrl = process.env.MARKET_SERVICE_URL ?? "http://localhost:4003";
 const quorumThreshold = Number(process.env.RESOLUTION_QUORUM_THRESHOLD ?? 2);
 
+async function appendStreamEvent(event: {
+  market_id: string;
+  payload: unknown;
+  created_at?: string;
+}) {
+  await pool.query(
+    `
+      INSERT INTO stream_events (
+        event_id,
+        channel,
+        market_id,
+        agent_id,
+        payload,
+        created_at
+      )
+      VALUES ($1, 'resolution.update', $2, NULL, $3::jsonb, $4::timestamptz)
+    `,
+    [
+      randomUUID(),
+      event.market_id,
+      JSON.stringify(event.payload),
+      event.created_at ?? new Date().toISOString(),
+    ],
+  );
+}
+
 function mapResolutionEvidenceRow(row: ResolutionEvidenceRow): ResolutionEvidence {
   return {
     id: row.id,
@@ -412,6 +438,20 @@ app.post("/v1/resolution-evidence", async (request, reply) => {
   resolutionCase.evidence = await getResolutionEvidence(marketId);
   updateResolutionCaseState(resolutionCase);
   await saveResolutionCase(resolutionCase);
+  await appendStreamEvent({
+    market_id: marketId,
+    payload: {
+      market_id: resolutionCase.market_id,
+      status: resolutionCase.status,
+      draft_outcome: resolutionCase.draft_outcome,
+      final_outcome: resolutionCase.final_outcome,
+      canonical_source_url: resolutionCase.canonical_source_url,
+      evidence: resolutionCase.evidence,
+      quorum_threshold: resolutionCase.quorum_threshold,
+      last_updated_at: resolutionCase.last_updated_at,
+    },
+    created_at: resolutionCase.last_updated_at,
+  });
   reply.code(201);
   return evidence;
 });

@@ -7,6 +7,8 @@ import {
   toNumberOrNull,
 } from "@agentic-polymarket/persistence";
 import type { ResolutionKind, ResolutionMetadata } from "@agentic-polymarket/sdk-types";
+import { randomUUID } from "node:crypto";
+import type { PoolClient } from "pg";
 
 type MarketRecord = {
   id: string;
@@ -49,6 +51,27 @@ type MarketRow = {
 const port = Number(process.env.MARKET_SERVICE_PORT ?? 4003);
 const app = Fastify({ logger: true });
 const pool = createDatabasePool();
+type Queryable = Pick<PoolClient, "query">;
+
+type OrderbookLevel = {
+  price: number;
+  size: number;
+};
+
+type OrderbookSnapshot = {
+  market_id: string;
+  yes_bids: OrderbookLevel[];
+  yes_asks: OrderbookLevel[];
+  no_bids: OrderbookLevel[];
+  no_asks: OrderbookLevel[];
+};
+
+type OrderbookRow = {
+  outcome: "YES" | "NO";
+  side: "buy" | "sell";
+  price: unknown;
+  remaining_size: unknown;
+};
 
 function mapMarketRow(row: MarketRow): MarketRecord {
   return {
@@ -69,6 +92,88 @@ function mapMarketRow(row: MarketRow): MarketRecord {
     outcomes: parseJsonField<["YES", "NO"]>(row.outcomes),
     rules: row.rules,
   };
+}
+
+async function getOrderbookSnapshot(client: Queryable, marketId: string): Promise<OrderbookSnapshot> {
+  const result = await client.query<OrderbookRow>(
+    `
+      SELECT
+        outcome,
+        side,
+        price,
+        SUM(GREATEST(size - filled_size, 0)) AS remaining_size
+      FROM orders
+      WHERE market_id = $1
+        AND status IN ('open', 'partially_filled')
+      GROUP BY outcome, side, price
+    `,
+    [marketId],
+  );
+
+  const snapshot: OrderbookSnapshot = {
+    market_id: marketId,
+    yes_bids: [],
+    yes_asks: [],
+    no_bids: [],
+    no_asks: [],
+  };
+
+  for (const row of result.rows) {
+    const level = {
+      price: Number(row.price),
+      size: Number(row.remaining_size),
+    };
+
+    if (row.outcome === "YES" && row.side === "buy") {
+      snapshot.yes_bids.push(level);
+    } else if (row.outcome === "YES" && row.side === "sell") {
+      snapshot.yes_asks.push(level);
+    } else if (row.outcome === "NO" && row.side === "buy") {
+      snapshot.no_bids.push(level);
+    } else if (row.outcome === "NO" && row.side === "sell") {
+      snapshot.no_asks.push(level);
+    }
+  }
+
+  snapshot.yes_bids.sort((left, right) => right.price - left.price || right.size - left.size);
+  snapshot.yes_asks.sort((left, right) => left.price - right.price || right.size - left.size);
+  snapshot.no_bids.sort((left, right) => right.price - left.price || right.size - left.size);
+  snapshot.no_asks.sort((left, right) => left.price - right.price || right.size - left.size);
+
+  return snapshot;
+}
+
+async function appendStreamEvent(
+  client: Queryable,
+  event: {
+    channel: string;
+    market_id?: string | null;
+    agent_id?: string | null;
+    payload: unknown;
+    created_at?: string;
+  },
+) {
+  await client.query(
+    `
+      INSERT INTO stream_events (
+        event_id,
+        channel,
+        market_id,
+        agent_id,
+        payload,
+        created_at
+      )
+      VALUES ($1, $2, $3, $4, $5::jsonb, $6::timestamptz)
+    `,
+    [
+      randomUUID(),
+      event.channel,
+      event.market_id ?? null,
+      event.agent_id ?? null,
+      JSON.stringify(event.payload),
+      event.created_at ?? new Date().toISOString(),
+    ],
+  );
 }
 
 app.get("/health", async () => ({ service: "market-service", status: "ok" }));
@@ -158,69 +263,92 @@ app.post("/v1/internal/markets", async (request, reply) => {
     return mapMarketRow(existing.rows[0]);
   }
 
-  const inserted = await pool.query<MarketRow>(
-    `
-      INSERT INTO markets (
-        id,
-        proposal_id,
-        event_id,
-        title,
-        subtitle,
-        status,
-        category,
-        close_time,
-        resolution_source,
-        resolution_kind,
-        resolution_metadata,
-        last_traded_price_yes,
-        volume_24h,
-        liquidity_score,
-        outcomes,
-        rules
-      )
-      VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9, $10, $11::jsonb, $12, $13, $14, $15::jsonb, $16
-      )
-      RETURNING
-        id,
-        proposal_id,
-        event_id,
-        title,
-        subtitle,
-        status,
-        category,
-        close_time,
-        resolution_source,
-        resolution_kind,
-        resolution_metadata,
-        last_traded_price_yes,
-        volume_24h,
-        liquidity_score,
-        outcomes,
-        rules
-    `,
-    [
-      body.proposal_id,
-      body.proposal_id,
-      `evt-${body.proposal_id}`,
-      body.title,
-      null,
-      "open",
-      body.category ?? "uncategorized",
-      body.close_time,
-      body.source_of_truth_url,
-      body.resolution_kind,
-      JSON.stringify(body.resolution_metadata),
-      null,
-      0,
-      0,
-      JSON.stringify(["YES", "NO"]),
-      body.resolution_criteria,
-    ],
-  );
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
 
-  reply.code(201);
-  return mapMarketRow(inserted.rows[0]);
+    const inserted = await client.query<MarketRow>(
+      `
+        INSERT INTO markets (
+          id,
+          proposal_id,
+          event_id,
+          title,
+          subtitle,
+          status,
+          category,
+          close_time,
+          resolution_source,
+          resolution_kind,
+          resolution_metadata,
+          last_traded_price_yes,
+          volume_24h,
+          liquidity_score,
+          outcomes,
+          rules
+        )
+        VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9, $10, $11::jsonb, $12, $13, $14, $15::jsonb, $16
+        )
+        RETURNING
+          id,
+          proposal_id,
+          event_id,
+          title,
+          subtitle,
+          status,
+          category,
+          close_time,
+          resolution_source,
+          resolution_kind,
+          resolution_metadata,
+          last_traded_price_yes,
+          volume_24h,
+          liquidity_score,
+          outcomes,
+          rules
+      `,
+      [
+        body.proposal_id,
+        body.proposal_id,
+        `evt-${body.proposal_id}`,
+        body.title,
+        null,
+        "open",
+        body.category ?? "uncategorized",
+        body.close_time,
+        body.source_of_truth_url,
+        body.resolution_kind,
+        JSON.stringify(body.resolution_metadata),
+        null,
+        0,
+        0,
+        JSON.stringify(["YES", "NO"]),
+        body.resolution_criteria,
+      ],
+    );
+
+    const market = mapMarketRow(inserted.rows[0]);
+    await appendStreamEvent(client, {
+      channel: "market.snapshot",
+      market_id: market.id,
+      payload: market,
+    });
+    await appendStreamEvent(client, {
+      channel: "orderbook.delta",
+      market_id: market.id,
+      payload: await getOrderbookSnapshot(client, market.id),
+    });
+
+    await client.query("COMMIT");
+    reply.code(201);
+    return market;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 });
 
 app.get("/v1/markets/:marketId", async (request, reply) => {
@@ -266,12 +394,7 @@ app.get("/v1/markets/:marketId", async (request, reply) => {
       category: market.category,
       slug: market.id,
     },
-    orderbook: {
-      yes_bids: [],
-      yes_asks: [],
-      no_bids: [],
-      no_asks: [],
-    },
+    orderbook: await getOrderbookSnapshot(pool, market.id),
   };
 });
 

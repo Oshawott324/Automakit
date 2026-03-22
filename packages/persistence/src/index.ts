@@ -159,6 +159,25 @@ export async function ensureCoreSchema(pool: Pool) {
     CREATE INDEX IF NOT EXISTS idx_order_events_market_sequence
       ON order_events (market_id, sequence_id);
 
+    CREATE TABLE IF NOT EXISTS stream_events (
+      sequence_id BIGSERIAL PRIMARY KEY,
+      event_id TEXT NOT NULL UNIQUE,
+      channel TEXT NOT NULL,
+      market_id TEXT,
+      agent_id TEXT,
+      payload JSONB NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_stream_events_sequence
+      ON stream_events (sequence_id);
+
+    CREATE INDEX IF NOT EXISTS idx_stream_events_market_sequence
+      ON stream_events (market_id, sequence_id);
+
+    CREATE INDEX IF NOT EXISTS idx_stream_events_agent_sequence
+      ON stream_events (agent_id, sequence_id);
+
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS filled_size DOUBLE PRECISION NOT NULL DEFAULT 0;
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
   `);

@@ -17,6 +17,7 @@ services/
   portfolio-service/
   proposal-pipeline/
   resolution-service/
+  stream-service/
 adapters/
   openclaw/
 packages/
@@ -59,13 +60,14 @@ Core product state for agents, auth challenges, access tokens, proposals, market
 - Bearer-token introspection plus detached Ed25519 request signatures in `agent-gateway`.
 - Persistent order intake with signed order submission, cancel, lookup, and fill history.
 - Rust matching-engine integration with price-time matching, append-only order events, and startup replay from Postgres.
+- Durable `stream_events` plus a dedicated `stream-service` for WebSocket snapshot and delta delivery.
 - Portfolio readback derived from persisted orders and fills.
 
 The current trading path is real but still limited:
 
 - the matching engine reconstructs its in-memory books from persisted `order_events` on startup, but does not yet persist snapshots itself,
-- there is no websocket market data yet,
 - portfolio accounting is still simplified and not margin-aware.
+- stream fanout is currently DB-poll based rather than using logical replication or a broker.
 
 ## Live Test
 
@@ -75,6 +77,7 @@ The autonomous local stack can be verified with:
 pnpm build
 pnpm live:test
 pnpm live:test:agent-auth
+pnpm live:test:streams
 ```
 
 `pnpm live:test` provisions its own disposable local Postgres-wire database backed by PGlite, boots the persisted services against that database, and verifies that proposals, markets, and resolution cases survive service restarts.
@@ -87,6 +90,13 @@ pnpm live:test:agent-auth
 - signed order submission through `agent-gateway`,
 - Rust matching-engine order crossing, restart-time replay from `order_events`, and persistent fills,
 - persistent order lookup, portfolio updates, market stat updates, and cancel.
+
+`pnpm live:test:streams` provisions the same disposable local database layer and verifies:
+
+- authenticated WebSocket connection to `stream-service`,
+- snapshot delivery for `market.snapshot`, `orderbook.delta`, `trade.fill`, `order.update`, `portfolio.update`, and `resolution.update`,
+- delta replay from `from_sequence` after disconnect,
+- durable stream emission from market creation, order submission, fills, cancels, and autonomous resolution updates.
 
 `market-creator` requires `MARKET_CREATOR_SIGNAL_FEED_URLS` in normal runtime. The live test spins up its own temporary feed server and verifies:
 
@@ -129,6 +139,36 @@ Matched orders are forwarded to `matching-engine`, persisted back into `orders` 
 
 The gateway also appends durable `order_events` for `accepted`, `fill`, and `canceled`. On startup, the Rust engine replays those events in sequence and rebuilds the open books before accepting new traffic.
 
+## WebSocket Streams
+
+The implemented stream surface is provided by `stream-service` at `GET /v1/stream/ws`.
+
+Clients authenticate with the same bearer token used for agent HTTP APIs, then send a subscribe frame:
+
+```json
+{
+  "type": "subscribe",
+  "channels": [
+    "market.snapshot",
+    "orderbook.delta",
+    "trade.fill",
+    "order.update",
+    "portfolio.update",
+    "resolution.update"
+  ],
+  "market_id": "optional-market-id",
+  "from_sequence": 123,
+  "snapshot": false
+}
+```
+
+- If `snapshot` is omitted or `true`, the service sends current snapshots first and then streams deltas after the snapshot baseline sequence.
+- If `snapshot` is `false`, the service replays durable deltas strictly after `from_sequence`.
+- Agent-scoped channels such as `order.update` and `portfolio.update` are filtered to the authenticated agent.
+- Public market channels are filtered by `market_id` when provided.
+
+All stream deltas come from persisted `stream_events`, not from in-memory callbacks.
+
 ## Initial Product Direction
 
 - Binary `YES/NO` markets only in v1.
@@ -139,15 +179,13 @@ The gateway also appends durable `order_events` for `accepted`, `fill`, and `can
 ## Suggested Near-Term Milestones
 
 1. Move portfolio accounting into a dedicated persisted service with proper realized/unrealized PnL and risk checks.
-2. Add websocket streams for books, fills, and agent order state.
-3. Add matching-engine snapshots and sequence-based reconciliation instead of replay-only recovery.
+2. Add matching-engine snapshots and sequence-based reconciliation instead of replay-only recovery.
+3. Replace DB-poll stream fanout with lower-latency replication or broker-backed delivery.
 4. Add the market creation pipeline with autonomous publication decisions.
 5. Add the resolution workflow with autonomous evidence collection and finalization logs.
 
 ## License
 
 This repository is licensed under the GNU Affero General Public License v3.0. See [LICENSE](./LICENSE).
-
-That choice is deliberate for this project:
 
 The license does not grant trademark rights to the project name, branding, or logos.

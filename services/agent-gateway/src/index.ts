@@ -56,6 +56,42 @@ type FillRow = {
   executed_at: unknown;
 };
 
+type OrderbookLevel = {
+  price: number;
+  size: number;
+};
+
+type OrderbookRow = {
+  outcome: Outcome;
+  side: Side;
+  price: unknown;
+  remaining_size: unknown;
+};
+
+type PortfolioPositionRow = {
+  market_id: string;
+  outcome: Outcome;
+  quantity: unknown;
+  bought_qty: unknown;
+  bought_notional: unknown;
+  mark_price_yes: unknown;
+};
+
+type PortfolioSnapshot = {
+  agent_id: string;
+  cash_balance: number;
+  reserved_balance: number;
+  realized_pnl: number;
+  unrealized_pnl: number;
+  positions: Array<{
+    market_id: string;
+    outcome: Outcome;
+    quantity: number;
+    average_price: number;
+    mark_price: number;
+  }>;
+};
+
 type MatchingFill = {
   fill_id: string;
   market_id: string;
@@ -99,6 +135,8 @@ const defaultCashBalance = Number(process.env.AGENT_DEFAULT_CASH_BALANCE ?? 1000
 const maxSignatureAgeMs = Number(process.env.AGENT_REQUEST_MAX_AGE_MS ?? 5 * 60_000);
 const app = Fastify({ logger: true });
 const pool = createDatabasePool();
+
+type Queryable = Pick<PoolClient, "query">;
 
 function sha256(value: string) {
   return createHash("sha256").update(value).digest("hex");
@@ -172,6 +210,158 @@ function mapFillRow(row: FillRow) {
     sell_agent_id: row.sell_agent_id,
     executed_at: toIsoTimestamp(row.executed_at),
   };
+}
+
+async function getOrderbookSnapshot(client: Queryable, marketId: string) {
+  const result = await client.query<OrderbookRow>(
+    `
+      SELECT
+        outcome,
+        side,
+        price,
+        SUM(GREATEST(size - filled_size, 0)) AS remaining_size
+      FROM orders
+      WHERE market_id = $1
+        AND status IN ('open', 'partially_filled')
+      GROUP BY outcome, side, price
+    `,
+    [marketId],
+  );
+
+  const snapshot = {
+    market_id: marketId,
+    yes_bids: [] as OrderbookLevel[],
+    yes_asks: [] as OrderbookLevel[],
+    no_bids: [] as OrderbookLevel[],
+    no_asks: [] as OrderbookLevel[],
+  };
+
+  for (const row of result.rows) {
+    const level = {
+      price: Number(row.price),
+      size: Number(row.remaining_size),
+    };
+
+    if (row.outcome === "YES" && row.side === "buy") {
+      snapshot.yes_bids.push(level);
+    } else if (row.outcome === "YES" && row.side === "sell") {
+      snapshot.yes_asks.push(level);
+    } else if (row.outcome === "NO" && row.side === "buy") {
+      snapshot.no_bids.push(level);
+    } else if (row.outcome === "NO" && row.side === "sell") {
+      snapshot.no_asks.push(level);
+    }
+  }
+
+  snapshot.yes_bids.sort((left, right) => right.price - left.price || right.size - left.size);
+  snapshot.yes_asks.sort((left, right) => left.price - right.price || right.size - left.size);
+  snapshot.no_bids.sort((left, right) => right.price - left.price || right.size - left.size);
+  snapshot.no_asks.sort((left, right) => left.price - right.price || right.size - left.size);
+
+  return snapshot;
+}
+
+async function getPortfolioSnapshot(client: Queryable, agentId: string): Promise<PortfolioSnapshot> {
+  const [reservedResult, notionalResult, positionsResult] = await Promise.all([
+    client.query<{ reserved_balance: unknown }>(
+      `
+        SELECT COALESCE(SUM(price * GREATEST(size - filled_size, 0)), 0) AS reserved_balance
+        FROM orders
+        WHERE agent_id = $1
+          AND side = 'buy'
+          AND status IN ('open', 'partially_filled')
+      `,
+      [agentId],
+    ),
+    client.query<{ buy_notional: unknown; sell_notional: unknown }>(
+      `
+        SELECT
+          COALESCE(SUM(CASE WHEN buy_agent_id = $1 THEN price * size ELSE 0 END), 0) AS buy_notional,
+          COALESCE(SUM(CASE WHEN sell_agent_id = $1 THEN price * size ELSE 0 END), 0) AS sell_notional
+        FROM fills
+        WHERE buy_agent_id = $1 OR sell_agent_id = $1
+      `,
+      [agentId],
+    ),
+    client.query<PortfolioPositionRow>(
+      `
+        SELECT
+          f.market_id,
+          f.outcome,
+          SUM(CASE WHEN f.buy_agent_id = $1 THEN f.size ELSE -f.size END) AS quantity,
+          SUM(CASE WHEN f.buy_agent_id = $1 THEN f.size ELSE 0 END) AS bought_qty,
+          SUM(CASE WHEN f.buy_agent_id = $1 THEN f.price * f.size ELSE 0 END) AS bought_notional,
+          MAX(m.last_traded_price_yes) AS mark_price_yes
+        FROM fills f
+        JOIN markets m ON m.id = f.market_id
+        WHERE f.buy_agent_id = $1 OR f.sell_agent_id = $1
+        GROUP BY f.market_id, f.outcome
+        HAVING SUM(CASE WHEN f.buy_agent_id = $1 THEN f.size ELSE -f.size END) <> 0
+      `,
+      [agentId],
+    ),
+  ]);
+
+  const reservedBalance = Number(reservedResult.rows[0]?.reserved_balance ?? 0);
+  const buyNotional = Number(notionalResult.rows[0]?.buy_notional ?? 0);
+  const sellNotional = Number(notionalResult.rows[0]?.sell_notional ?? 0);
+  const cashBalance = defaultCashBalance - buyNotional + sellNotional - reservedBalance;
+
+  return {
+    agent_id: agentId,
+    cash_balance: cashBalance,
+    reserved_balance: reservedBalance,
+    realized_pnl: 0,
+    unrealized_pnl: 0,
+    positions: positionsResult.rows.map((row) => {
+      const quantity = Number(row.quantity);
+      const boughtQty = Number(row.bought_qty);
+      const boughtNotional = Number(row.bought_notional);
+      const markPriceYes = Number(row.mark_price_yes ?? 0);
+      const markPrice = row.outcome === "YES" ? markPriceYes : 1 - markPriceYes;
+
+      return {
+        market_id: row.market_id,
+        outcome: row.outcome,
+        quantity,
+        average_price: boughtQty > 0 ? boughtNotional / boughtQty : 0,
+        mark_price: markPrice,
+      };
+    }),
+  };
+}
+
+async function appendStreamEvent(
+  client: Queryable,
+  event: {
+    channel: string;
+    market_id?: string | null;
+    agent_id?: string | null;
+    payload: unknown;
+    created_at?: string;
+  },
+) {
+  await client.query(
+    `
+      INSERT INTO stream_events (
+        event_id,
+        channel,
+        market_id,
+        agent_id,
+        payload,
+        created_at
+      )
+      VALUES ($1, $2, $3, $4, $5::jsonb, $6::timestamptz)
+    `,
+    [
+      randomUUID(),
+      event.channel,
+      event.market_id ?? null,
+      event.agent_id ?? null,
+      JSON.stringify(event.payload),
+      event.created_at ?? new Date().toISOString(),
+    ],
+  );
 }
 
 async function introspectToken(token: string): Promise<IntrospectionResponse> {
@@ -459,83 +649,7 @@ app.get("/v1/portfolio", async (request, reply) => {
     reply.code(401);
     return { error: "missing_agent_context" };
   }
-
-  const [reservedResult, notionalResult, positionsResult] = await Promise.all([
-    pool.query<{ reserved_balance: unknown }>(
-      `
-        SELECT COALESCE(SUM(price * GREATEST(size - filled_size, 0)), 0) AS reserved_balance
-        FROM orders
-        WHERE agent_id = $1
-          AND side = 'buy'
-          AND status IN ('open', 'partially_filled')
-      `,
-      [agent.id],
-    ),
-    pool.query<{ buy_notional: unknown; sell_notional: unknown }>(
-      `
-        SELECT
-          COALESCE(SUM(CASE WHEN buy_agent_id = $1 THEN price * size ELSE 0 END), 0) AS buy_notional,
-          COALESCE(SUM(CASE WHEN sell_agent_id = $1 THEN price * size ELSE 0 END), 0) AS sell_notional
-        FROM fills
-        WHERE buy_agent_id = $1 OR sell_agent_id = $1
-      `,
-      [agent.id],
-    ),
-    pool.query<{
-      market_id: string;
-      outcome: Outcome;
-      quantity: unknown;
-      bought_qty: unknown;
-      bought_notional: unknown;
-      mark_price_yes: unknown;
-    }>(
-      `
-        SELECT
-          f.market_id,
-          f.outcome,
-          SUM(CASE WHEN f.buy_agent_id = $1 THEN f.size ELSE -f.size END) AS quantity,
-          SUM(CASE WHEN f.buy_agent_id = $1 THEN f.size ELSE 0 END) AS bought_qty,
-          SUM(CASE WHEN f.buy_agent_id = $1 THEN f.price * f.size ELSE 0 END) AS bought_notional,
-          MAX(m.last_traded_price_yes) AS mark_price_yes
-        FROM fills f
-        JOIN markets m ON m.id = f.market_id
-        WHERE f.buy_agent_id = $1 OR f.sell_agent_id = $1
-        GROUP BY f.market_id, f.outcome
-        HAVING SUM(CASE WHEN f.buy_agent_id = $1 THEN f.size ELSE -f.size END) <> 0
-      `,
-      [agent.id],
-    ),
-  ]);
-
-  const reservedBalance = Number(reservedResult.rows[0]?.reserved_balance ?? 0);
-  const buyNotional = Number(notionalResult.rows[0]?.buy_notional ?? 0);
-  const sellNotional = Number(notionalResult.rows[0]?.sell_notional ?? 0);
-  const cashBalance = defaultCashBalance - buyNotional + sellNotional - reservedBalance;
-
-  const positions = positionsResult.rows.map((row) => {
-    const quantity = Number(row.quantity);
-    const boughtQty = Number(row.bought_qty);
-    const boughtNotional = Number(row.bought_notional);
-    const markPriceYes = Number(row.mark_price_yes ?? 0);
-    const markPrice = row.outcome === "YES" ? markPriceYes : 1 - markPriceYes;
-
-    return {
-      market_id: row.market_id,
-      outcome: row.outcome,
-      quantity,
-      average_price: boughtQty > 0 ? boughtNotional / boughtQty : 0,
-      mark_price: markPrice,
-    };
-  });
-
-  return {
-    agent_id: agent.id,
-    cash_balance: cashBalance,
-    reserved_balance: reservedBalance,
-    realized_pnl: 0,
-    unrealized_pnl: 0,
-    positions,
-  };
+  return getPortfolioSnapshot(pool, agent.id);
 });
 
 app.post("/v1/orders", async (request, reply) => {
@@ -701,6 +815,75 @@ app.post("/v1/orders", async (request, reply) => {
     }
 
     await insertFillsAndUpdateMarketStats(client, matchingResult.fills);
+
+    const touchedOrderIds = matchingResult.touched_orders.map((entry) => entry.order_id);
+    const touchedOrdersResult = await client.query<OrderRow>(
+      `
+        SELECT *
+        FROM orders
+        WHERE id = ANY($1::text[])
+      `,
+      [touchedOrderIds],
+    );
+
+    const touchedOrders = touchedOrdersResult.rows.map(mapOrderRow);
+    for (const order of touchedOrders) {
+      await appendStreamEvent(client, {
+        channel: "order.update",
+        market_id: order.market_id,
+        agent_id: order.agent_id,
+        payload: order,
+        created_at: order.updated_at,
+      });
+    }
+
+    for (const fill of matchingResult.fills) {
+      await appendStreamEvent(client, {
+        channel: "trade.fill",
+        market_id: fill.market_id,
+        payload: {
+          id: fill.fill_id,
+          market_id: fill.market_id,
+          outcome: fill.outcome,
+          price: fill.price,
+          size: fill.size,
+          buy_order_id: fill.buy_order_id,
+          sell_order_id: fill.sell_order_id,
+          buy_agent_id: fill.buy_agent_id,
+          sell_agent_id: fill.sell_agent_id,
+          executed_at: fill.executed_at,
+        },
+        created_at: fill.executed_at,
+      });
+    }
+
+    await appendStreamEvent(client, {
+      channel: "orderbook.delta",
+      market_id: body.market_id,
+      payload: {
+        ...(await getOrderbookSnapshot(client, body.market_id)),
+        reason: "order_submit",
+        touched_order_ids: touchedOrderIds,
+      },
+    });
+
+    const affectedAgentIds = new Set<string>([agent.id]);
+    for (const order of touchedOrders) {
+      affectedAgentIds.add(order.agent_id);
+    }
+    for (const fill of matchingResult.fills) {
+      affectedAgentIds.add(fill.buy_agent_id);
+      affectedAgentIds.add(fill.sell_agent_id);
+    }
+
+    for (const affectedAgentId of affectedAgentIds) {
+      await appendStreamEvent(client, {
+        channel: "portfolio.update",
+        agent_id: affectedAgentId,
+        market_id: body.market_id,
+        payload: await getPortfolioSnapshot(client, affectedAgentId),
+      });
+    }
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK");
@@ -784,6 +967,37 @@ app.post("/v1/orders/cancel", async (request, reply) => {
       [order.id],
     );
     await appendCanceledOrderEvent(client, order);
+    const canceledOrderResult = await client.query<OrderRow>(
+      `
+        SELECT *
+        FROM orders
+        WHERE id = $1
+      `,
+      [order.id],
+    );
+    const canceledOrder = mapOrderRow(canceledOrderResult.rows[0]);
+    await appendStreamEvent(client, {
+      channel: "order.update",
+      market_id: canceledOrder.market_id,
+      agent_id: canceledOrder.agent_id,
+      payload: canceledOrder,
+      created_at: canceledOrder.updated_at,
+    });
+    await appendStreamEvent(client, {
+      channel: "orderbook.delta",
+      market_id: canceledOrder.market_id,
+      payload: {
+        ...(await getOrderbookSnapshot(client, canceledOrder.market_id)),
+        reason: "order_cancel",
+        touched_order_ids: [canceledOrder.id],
+      },
+    });
+    await appendStreamEvent(client, {
+      channel: "portfolio.update",
+      market_id: canceledOrder.market_id,
+      agent_id: canceledOrder.agent_id,
+      payload: await getPortfolioSnapshot(client, canceledOrder.agent_id),
+    });
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK");

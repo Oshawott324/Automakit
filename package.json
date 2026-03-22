@@ -10,6 +10,7 @@
     "dev:matching-engine": "cargo run --manifest-path services/matching-engine/Cargo.toml",
     "live:test": "tsx scripts/live-test.ts",
     "live:test:agent-auth": "tsx scripts/live-test-agent-auth.ts",
+    "live:test:streams": "tsx scripts/live-test-streams.ts",
     "lint": "pnpm -r --if-present lint",
     "typecheck": "pnpm -r --if-present typecheck"
   },
@@ -19,8 +20,10 @@
     "@types/pg": "^8.15.5",
     "@types/react": "^19.1.2",
     "@types/react-dom": "^19.1.2",
+    "@types/ws": "^8.18.1",
     "pg": "^8.16.3",
     "tsx": "^4.20.6",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "ws": "^8.18.3"
   }
 }
