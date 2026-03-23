@@ -215,8 +215,276 @@ async function main() {
   };
 
   let fedObservationCount = 0;
+  function toJsonCompletion(content: unknown) {
+    return {
+      id: "chatcmpl-live-test",
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model: "live-test-model",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: JSON.stringify(content) },
+          finish_reason: "stop",
+        },
+      ],
+    };
+  }
 
-  const feedServer = http.createServer((request, response) => {
+  async function readJsonRequestBody(request: http.IncomingMessage) {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) {
+      chunks.push(Buffer.from(chunk));
+    }
+    if (chunks.length === 0) {
+      return {};
+    }
+    return JSON.parse(Buffer.concat(chunks).toString("utf-8")) as Record<string, unknown>;
+  }
+
+  function asString(value: unknown, fallback = "") {
+    return typeof value === "string" ? value : fallback;
+  }
+
+  function asNumber(value: unknown, fallback = 0) {
+    return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  }
+
+  function handleWorldModelMock(payload: Record<string, unknown>) {
+    const userMessage = Array.isArray(payload.messages)
+      ? ((payload.messages as Array<Record<string, unknown>>).find(
+          (message) => message.role === "user",
+        ) as Record<string, unknown> | undefined)
+      : undefined;
+    const userContent =
+      userMessage && typeof userMessage.content === "string"
+        ? (JSON.parse(userMessage.content) as { signals?: Array<Record<string, unknown>> })
+        : { signals: [] };
+    const signals = Array.isArray(userContent.signals) ? userContent.signals : [];
+    const hypotheses = signals
+      .map((signal) => {
+        const payloadObject =
+          signal.payload && typeof signal.payload === "object"
+            ? (signal.payload as Record<string, unknown>)
+            : {};
+        const signalId = asString(signal.id);
+        if (!signalId) {
+          return null;
+        }
+        if (payloadObject.kind === "price_threshold") {
+          return {
+            source_signal_id: signalId,
+            hypothesis_kind: "price_threshold",
+            category: typeof payloadObject.category === "string" ? payloadObject.category : "crypto",
+            subject: typeof payloadObject.asset_symbol === "string" ? payloadObject.asset_symbol : "BTC",
+            predicate: "price_threshold",
+            target_time:
+              typeof payloadObject.target_time === "string"
+                ? payloadObject.target_time
+                : new Date().toISOString(),
+            confidence_score: 0.79,
+            reasoning_summary: "LLM world-model interpreted the threshold signal as bullish.",
+            machine_resolvable: true,
+          };
+        }
+        if (payloadObject.kind === "rate_decision") {
+          const direction =
+            payloadObject.direction === "hold" || payloadObject.direction === "hike"
+              ? payloadObject.direction
+              : "cut";
+          return {
+            source_signal_id: signalId,
+            hypothesis_kind: "rate_decision",
+            category: typeof payloadObject.category === "string" ? payloadObject.category : "macro",
+            subject:
+              typeof payloadObject.institution === "string" ? payloadObject.institution : "Federal Reserve",
+            predicate: `rate_decision_${direction}`,
+            target_time:
+              typeof payloadObject.target_time === "string"
+                ? payloadObject.target_time
+                : new Date().toISOString(),
+            confidence_score: 0.74,
+            reasoning_summary: "LLM world-model interpreted policy signal as easing-biased.",
+            machine_resolvable: true,
+          };
+        }
+        return null;
+      })
+      .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
+
+    const entities = signals.flatMap((signal) => {
+      const signalId = asString(signal.id);
+      if (!signalId) {
+        return [];
+      }
+      const refs = Array.isArray(signal.entity_refs) ? signal.entity_refs : [];
+      return refs
+        .filter((entry) => entry && typeof entry === "object")
+        .map((entry) => {
+          const typed = entry as Record<string, unknown>;
+          return {
+            id: `${asString(typed.kind)}:${asString(typed.value)}`,
+            kind: asString(typed.kind),
+            name: asString(typed.value),
+            attributes: {
+              source_signal_id: signalId,
+            },
+          };
+        });
+    });
+    const activeEvents = signals
+      .map((signal) => {
+        const signalId = asString(signal.id);
+        if (!signalId) {
+          return null;
+        }
+        return {
+          id: signalId,
+          title: asString(signal.title, "world-signal"),
+          event_type:
+            signal.payload &&
+            typeof signal.payload === "object" &&
+            typeof (signal.payload as Record<string, unknown>).kind === "string"
+              ? asString((signal.payload as Record<string, unknown>).kind)
+              : "world_signal",
+          effective_at: signal.effective_at ?? null,
+          source_signal_ids: [signalId],
+        };
+      })
+      .filter((event): event is NonNullable<typeof event> => Boolean(event));
+
+    return {
+      world_state: {
+        as_of: new Date().toISOString(),
+        entities,
+        active_events: activeEvents,
+        factors: [
+          {
+            factor: "llm_sentiment",
+            value: 0.72,
+            direction: "up",
+            rationale: "LLM interpreted a constructive outlook from incoming signals.",
+          },
+        ],
+        regime_labels: ["belief-layer", "market:risk_on"],
+        reasoning_summary: "LLM world-model synthesized incoming signals into a coherent regime view.",
+      },
+      hypotheses,
+    };
+  }
+
+  function handleScenarioMock(payload: Record<string, unknown>) {
+    const userMessage = Array.isArray(payload.messages)
+      ? ((payload.messages as Array<Record<string, unknown>>).find(
+          (message) => message.role === "user",
+        ) as Record<string, unknown> | undefined)
+      : undefined;
+    const userContent =
+      userMessage && typeof userMessage.content === "string"
+        ? (JSON.parse(userMessage.content) as {
+            scenario_label?: string;
+            hypotheses?: Array<Record<string, unknown>>;
+          })
+        : { scenario_label: "base", hypotheses: [] };
+    const scenarioLabel = typeof userContent.scenario_label === "string" ? userContent.scenario_label : "base";
+    const hypotheses = Array.isArray(userContent.hypotheses) ? userContent.hypotheses : [];
+    const delta = scenarioLabel === "bull" ? 0.1 : scenarioLabel === "bear" ? -0.1 : -0.02;
+    return {
+      narrative: `LLM scenario agent produced a ${scenarioLabel} path.`,
+      factor_deltas: {
+        scenario_label: scenarioLabel,
+        llm_path: true,
+      },
+      path_events: [
+        {
+          title: `${scenarioLabel} path launched`,
+          event_type: "scenario_path",
+          description: `LLM ${scenarioLabel} path event.`,
+          effective_at: new Date().toISOString(),
+        },
+      ],
+      path_hypotheses: hypotheses.map((hypothesis) => ({
+        key: asString(hypothesis.key),
+        confidence_score: Math.max(0.05, Math.min(0.95, asNumber(hypothesis.average_confidence, 0.6) + delta)),
+        reasoning_summary: `LLM scenario adjustment for ${scenarioLabel} path.`,
+      })),
+    };
+  }
+
+  function handleSynthesisMock(payload: Record<string, unknown>) {
+    const userMessage = Array.isArray(payload.messages)
+      ? ((payload.messages as Array<Record<string, unknown>>).find(
+          (message) => message.role === "user",
+        ) as Record<string, unknown> | undefined)
+      : undefined;
+    const userContent =
+      userMessage && typeof userMessage.content === "string"
+        ? (JSON.parse(userMessage.content) as { candidates?: Array<Record<string, unknown>> })
+        : { candidates: [] };
+    const candidates = Array.isArray(userContent.candidates) ? userContent.candidates : [];
+    return {
+      beliefs: candidates.map((candidate) => {
+        const direct = Array.isArray(candidate.direct) ? candidate.direct : [];
+        const scenario = Array.isArray(candidate.scenario) ? candidate.scenario : [];
+        const directAvg =
+          direct.length > 0
+            ? direct.reduce((sum, entry) => sum + Number((entry as Record<string, unknown>).confidence ?? 0), 0) /
+              direct.length
+            : 0.55;
+        const scenarioAvg =
+          scenario.length > 0
+            ? scenario.reduce((sum, entry) => {
+                const typed = entry as Record<string, unknown>;
+                return sum + Number(typed.confidence ?? 0) * Number(typed.probability ?? 0);
+              }, 0) /
+              Math.max(scenario.reduce((sum, entry) => sum + asNumber((entry as Record<string, unknown>).probability), 0), 1)
+            : directAvg;
+        const confidence = Math.max(0.05, Math.min(0.95, directAvg * 0.55 + scenarioAvg * 0.45));
+        return {
+          key: asString(candidate.key),
+          agreement_score: 0.72,
+          disagreement_score: 0.18,
+          confidence_score: confidence,
+          status: confidence >= 0.62 ? "new" : "suppressed",
+          conflict_notes: null,
+          suppression_reason: confidence >= 0.62 ? null : "insufficient_combined_confidence",
+          reasoning_summary: "LLM synthesis merged world-model and scenario outputs.",
+        };
+      }),
+    };
+  }
+
+  const feedServer = http.createServer(async (request, response) => {
+    if (request.url === "/v1/chat/completions" && request.method === "POST") {
+      const body = await readJsonRequestBody(request);
+      const systemMessage = Array.isArray(body.messages)
+        ? ((body.messages as Array<Record<string, unknown>>).find(
+            (message) => message.role === "system",
+          ) as Record<string, unknown> | undefined)
+        : undefined;
+      const systemPrompt =
+        systemMessage && typeof systemMessage.content === "string" ? systemMessage.content : "";
+      if (systemPrompt.includes("world-model agent")) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify(toJsonCompletion(handleWorldModelMock(body))));
+        return;
+      }
+      if (systemPrompt.includes("scenario simulation agent")) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify(toJsonCompletion(handleScenarioMock(body))));
+        return;
+      }
+      if (systemPrompt.includes("synthesis agent for a prediction-market simulation fabric")) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify(toJsonCompletion(handleSynthesisMock(body))));
+        return;
+      }
+
+      response.writeHead(400, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: "unsupported_prompt" }));
+      return;
+    }
+
     if (request.url === "/world-input/price") {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify(worldInputPricePayload));
@@ -268,6 +536,12 @@ async function main() {
   await new Promise<void>((resolve) => {
     feedServer.listen(feedPort, "127.0.0.1", () => resolve());
   });
+
+  const llmEnv = {
+    LLM_API_KEY: "live-test-key",
+    LLM_BASE_URL: `http://127.0.0.1:${feedPort}/v1`,
+    LLM_MODEL_NAME: "live-test-model",
+  };
 
   const processes: ManagedProcess[] = [];
   try {
@@ -394,6 +668,8 @@ async function main() {
           WORLD_MODEL_INTERVAL_MS: "250",
           WORLD_MODEL_AGENT_ID: "world-model-alpha",
           WORLD_MODEL_AGENT_PROFILE: "macro",
+          WORLD_MODEL_MODE: "llm",
+          ...llmEnv,
         },
         path.join(repoRoot, "services", "world-model"),
       ),
@@ -409,6 +685,8 @@ async function main() {
           WORLD_MODEL_INTERVAL_MS: "250",
           WORLD_MODEL_AGENT_ID: "world-model-beta",
           WORLD_MODEL_AGENT_PROFILE: "market",
+          WORLD_MODEL_MODE: "llm",
+          ...llmEnv,
         },
         path.join(repoRoot, "services", "world-model"),
       ),
@@ -439,6 +717,8 @@ async function main() {
           SCENARIO_AGENT_ID: "scenario-base",
           SCENARIO_LABEL: "base",
           SCENARIO_PROBABILITY: "0.5",
+          SCENARIO_AGENT_MODE: "llm",
+          ...llmEnv,
         },
         path.join(repoRoot, "services", "scenario-agent"),
       ),
@@ -455,6 +735,8 @@ async function main() {
           SCENARIO_AGENT_ID: "scenario-bull",
           SCENARIO_LABEL: "bull",
           SCENARIO_PROBABILITY: "0.3",
+          SCENARIO_AGENT_MODE: "llm",
+          ...llmEnv,
         },
         path.join(repoRoot, "services", "scenario-agent"),
       ),
@@ -471,6 +753,8 @@ async function main() {
           SCENARIO_AGENT_ID: "scenario-bear",
           SCENARIO_LABEL: "bear",
           SCENARIO_PROBABILITY: "0.2",
+          SCENARIO_AGENT_MODE: "llm",
+          ...llmEnv,
         },
         path.join(repoRoot, "services", "scenario-agent"),
       ),
@@ -485,6 +769,8 @@ async function main() {
           SYNTHESIS_AGENT_PORT: String(synthesisPort),
           SYNTHESIS_AGENT_INTERVAL_MS: "250",
           SYNTHESIS_AGENT_ID: "synthesis-core",
+          SYNTHESIS_AGENT_MODE: "llm",
+          ...llmEnv,
         },
         path.join(repoRoot, "services", "synthesis-agent"),
       ),

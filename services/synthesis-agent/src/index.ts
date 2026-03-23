@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
+import { loadLlmClientFromEnv } from "@automakit/agent-llm";
 import { createDatabasePool, ensureCoreSchema, parseJsonField, toIsoTimestamp } from "@automakit/persistence";
 import {
   type BeliefHypothesisProposal,
@@ -65,10 +66,26 @@ type SynthesizedBeliefRow = {
   updated_at: unknown;
 };
 
+type SynthesisLlmResponse = {
+  beliefs: Array<{
+    key: string;
+    agreement_score: number;
+    disagreement_score: number;
+    confidence_score: number;
+    status: SynthesizedBelief["status"];
+    conflict_notes?: string | null;
+    suppression_reason?: string | null;
+    reasoning_summary: string;
+  }>;
+};
+
 const port = Number(process.env.SYNTHESIS_AGENT_PORT ?? 4015);
 const intervalMs = Number(process.env.SYNTHESIS_AGENT_INTERVAL_MS ?? 1000);
 const batchSize = Number(process.env.SYNTHESIS_AGENT_BATCH_SIZE ?? 10);
 const agentId = process.env.SYNTHESIS_AGENT_ID ?? "synthesis-core";
+const mode = process.env.SYNTHESIS_AGENT_MODE ?? "llm";
+const llmStrict = (process.env.SYNTHESIS_AGENT_LLM_STRICT ?? "true").toLowerCase() !== "false";
+const llmClient = mode === "llm" ? loadLlmClientFromEnv() : null;
 const app = Fastify({ logger: true });
 const pool = createDatabasePool();
 
@@ -246,7 +263,7 @@ function collectCandidates(
   return aggregates;
 }
 
-function synthesize(runId: string, aggregate: CandidateAggregate) {
+function synthesizeHeuristic(runId: string, aggregate: CandidateAggregate) {
   const directScores = aggregate.direct.map((entry) => entry.confidence_score);
   const scenarioScores = aggregate.scenarioEntries.map((entry) => entry.confidence);
   const weightedScenario =
@@ -312,6 +329,103 @@ function synthesize(runId: string, aggregate: CandidateAggregate) {
   }
 
   return validation.belief;
+}
+
+function buildSynthesisLlmSystemPrompt() {
+  return [
+    "You are a synthesis agent for a prediction-market simulation fabric.",
+    "Return strict JSON only.",
+    "For each candidate key, output confidence, agreement, disagreement, status, and concise reasoning.",
+    "Use only provided keys.",
+    "All scores must be in [0,1].",
+  ].join(" ");
+}
+
+function buildSynthesisLlmUserPayload(aggregates: Map<string, CandidateAggregate>) {
+  return {
+    agent_id: agentId,
+    candidates: [...aggregates.entries()].map(([key, aggregate]) => ({
+      key,
+      hypothesis_kind: aggregate.base.hypothesis_kind,
+      category: aggregate.base.category,
+      subject: aggregate.base.subject,
+      predicate: aggregate.base.predicate,
+      target_time: aggregate.base.target_time,
+      machine_resolvable: aggregate.base.machine_resolvable,
+      direct: aggregate.direct.map((entry) => ({
+        confidence: entry.confidence_score,
+        reasoning: entry.reasoning_summary,
+      })),
+      scenario: aggregate.scenarioEntries.map((entry) => ({
+        label: entry.label,
+        confidence: entry.confidence,
+        probability: entry.probability,
+        reasoning: entry.reasoning,
+      })),
+    })),
+  };
+}
+
+async function synthesizeWithLlm(runId: string, aggregates: Map<string, CandidateAggregate>) {
+  if (!llmClient) {
+    throw new Error("synthesis_llm_client_unavailable");
+  }
+
+  const response = await llmClient.chatJson<SynthesisLlmResponse>([
+    { role: "system", content: buildSynthesisLlmSystemPrompt() },
+    {
+      role: "user",
+      content: JSON.stringify(buildSynthesisLlmUserPayload(aggregates)),
+    },
+  ]);
+
+  if (!response || typeof response !== "object" || !Array.isArray(response.beliefs)) {
+    throw new Error("invalid_synthesis_llm_response");
+  }
+
+  const beliefs: SynthesizedBelief[] = [];
+  for (const item of response.beliefs) {
+    const aggregate = aggregates.get(item.key);
+    if (!aggregate) {
+      continue;
+    }
+
+    const hypothesis: BeliefHypothesisProposal = {
+      ...aggregate.base,
+      id: randomUUID(),
+      run_id: runId,
+      agent_id: agentId,
+      confidence_score: clamp(Number(item.confidence_score)),
+      reasoning_summary: item.reasoning_summary,
+      created_at: new Date().toISOString(),
+    };
+    const synthesized: SynthesizedBelief = {
+      id: randomUUID(),
+      run_id: runId,
+      agent_id: agentId,
+      parent_hypothesis_ids: aggregate.direct.map((entry) => entry.id),
+      agreement_score: clamp(Number(item.agreement_score), 0, 1),
+      disagreement_score: clamp(Number(item.disagreement_score), 0, 1),
+      confidence_score: clamp(Number(item.confidence_score), 0, 1),
+      conflict_notes: item.conflict_notes ?? null,
+      hypothesis,
+      status: item.status,
+      suppression_reason: item.suppression_reason ?? null,
+      linked_proposal_id: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    const validation = validateSynthesizedBelief(synthesized);
+    if (validation.ok) {
+      beliefs.push(validation.belief);
+    }
+  }
+
+  if (beliefs.length === 0) {
+    throw new Error("synthesis_llm_produced_no_valid_beliefs");
+  }
+
+  return beliefs;
 }
 
 async function upsertSynthesizedBelief(belief: SynthesizedBelief) {
@@ -387,8 +501,22 @@ async function tick() {
       }
 
       const aggregates = collectCandidates(directHypotheses, scenarioPaths);
-      for (const aggregate of aggregates.values()) {
-        const belief = synthesize(run.id, aggregate);
+      let beliefs: SynthesizedBelief[] = [];
+      if (mode === "llm") {
+        try {
+          beliefs = await synthesizeWithLlm(run.id, aggregates);
+        } catch (error) {
+          if (llmStrict) {
+            throw error;
+          }
+          app.log.error({ err: error }, "synthesis-agent LLM generation failed; falling back to heuristic mode");
+          beliefs = [...aggregates.values()].map((aggregate) => synthesizeHeuristic(run.id, aggregate));
+        }
+      } else {
+        beliefs = [...aggregates.values()].map((aggregate) => synthesizeHeuristic(run.id, aggregate));
+      }
+
+      for (const belief of beliefs) {
         await upsertSynthesizedBelief(belief);
       }
     }
@@ -407,6 +535,7 @@ app.get("/health", async () => ({
   service: "synthesis-agent",
   status: "ok",
   agent_id: agentId,
+  mode,
   last_tick_at: lastTickAt,
   last_tick_error: lastTickError,
 }));

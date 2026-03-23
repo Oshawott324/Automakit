@@ -226,7 +226,7 @@ Responsibilities:
 - Deduplicate, score, and draft market proposals.
 - Route proposals into an autonomous publication queue.
 
-This service can use rules first and LLM assistance second. Do not make the LLM the sole source of correctness.
+This service remains deterministic for admission control. Upstream belief generation is handled by LLM-driven agents.
 
 ### 4.10 World Input
 
@@ -266,9 +266,8 @@ Responsibilities:
 Implementation direction:
 
 - The current service is `services/world-model`.
-- The current hardcoded mapping implementation should be treated as deprecated transitional code.
-- The target design is an agent runtime surface rather than a platform-owned belief engine.
-- Outputs should be validated structurally and stored even when agents disagree.
+- It runs in LLM mode by default, using OpenAI-compatible inference settings (`LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL_NAME`).
+- Outputs are validated structurally and stored even when agents disagree.
 - This layer must never be treated as the final authority for market settlement.
 
 ### 4.13 Scenario Agents

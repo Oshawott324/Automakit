@@ -10,6 +10,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@automakit/agent-llm": "workspace:*",
     "@automakit/persistence": "workspace:*",
     "@automakit/world-sim": "workspace:*",
     "fastify": "^5.3.2"

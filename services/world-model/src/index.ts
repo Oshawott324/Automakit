@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
+import { loadLlmClientFromEnv } from "@automakit/agent-llm";
 import { createDatabasePool, ensureCoreSchema, parseJsonField, toIsoTimestamp } from "@automakit/persistence";
 import type { ResolutionSpec } from "@automakit/sdk-types";
 import {
@@ -74,11 +75,36 @@ type BeliefHypothesisProposalRow = {
   created_at: unknown;
 };
 
+type WorldModelLlmResponse = {
+  world_state: {
+    as_of?: string;
+    entities?: WorldEntityState[];
+    active_events?: ActiveWorldEvent[];
+    factors?: WorldFactorState[];
+    regime_labels?: string[];
+    reasoning_summary?: string;
+  };
+  hypotheses: Array<{
+    source_signal_id: string;
+    hypothesis_kind: BeliefHypothesisProposal["hypothesis_kind"];
+    category: string;
+    subject: string;
+    predicate: string;
+    target_time: string;
+    confidence_score: number;
+    reasoning_summary: string;
+    machine_resolvable?: boolean;
+  }>;
+};
+
 const port = Number(process.env.WORLD_MODEL_PORT ?? 4011);
 const intervalMs = Number(process.env.WORLD_MODEL_INTERVAL_MS ?? 1000);
 const batchSize = Number(process.env.WORLD_MODEL_BATCH_SIZE ?? 10);
 const agentId = process.env.WORLD_MODEL_AGENT_ID ?? "world-model-alpha";
 const agentProfile = process.env.WORLD_MODEL_AGENT_PROFILE ?? "macro";
+const mode = process.env.WORLD_MODEL_MODE ?? "llm";
+const llmStrict = (process.env.WORLD_MODEL_LLM_STRICT ?? "true").toLowerCase() !== "false";
+const llmClient = mode === "llm" ? loadLlmClientFromEnv() : null;
 const app = Fastify({ logger: true });
 const pool = createDatabasePool();
 
@@ -494,6 +520,160 @@ function buildDirectHypotheses(runId: string, signals: WorldSignal[], regimeLabe
   return hypotheses;
 }
 
+function buildWorldModelLlmSystemPrompt() {
+  return [
+    "You are a world-model agent in an autonomous prediction-market platform.",
+    "Return strict JSON only.",
+    "Generate one world_state object and a hypotheses array.",
+    "Each hypothesis must map to one input signal via source_signal_id.",
+    "Use only these hypothesis kinds: price_threshold, rate_decision, filing_detected, game_result.",
+    "Set confidence_score in [0,1].",
+    "Never hallucinate source ids.",
+  ].join(" ");
+}
+
+function buildWorldModelLlmUserPayload(signals: WorldSignal[]) {
+  return {
+    agent_profile: agentProfile,
+    signals: signals.map((signal) => ({
+      id: signal.id,
+      source_type: signal.source_type,
+      title: signal.title,
+      summary: signal.summary,
+      effective_at: signal.effective_at,
+      entity_refs: signal.entity_refs,
+      payload: signal.payload,
+    })),
+  };
+}
+
+async function generateWithLlm(runId: string, triggerSignalIds: string[], signals: WorldSignal[]) {
+  if (!llmClient) {
+    throw new Error("world_model_llm_client_unavailable");
+  }
+
+  const response = await llmClient.chatJson<WorldModelLlmResponse>([
+    { role: "system", content: buildWorldModelLlmSystemPrompt() },
+    {
+      role: "user",
+      content: JSON.stringify(buildWorldModelLlmUserPayload(signals)),
+    },
+  ]);
+
+  if (!response || typeof response !== "object" || !Array.isArray(response.hypotheses)) {
+    throw new Error("invalid_world_model_llm_response");
+  }
+
+  const signalMap = new Map<string, WorldSignal>(signals.map((signal) => [signal.id, signal]));
+  const worldStateProposal: WorldStateProposal = {
+    id: randomUUID(),
+    run_id: runId,
+    agent_id: agentId,
+    source_signal_ids: triggerSignalIds,
+    as_of:
+      typeof response.world_state?.as_of === "string" ? response.world_state.as_of : new Date().toISOString(),
+    entities: Array.isArray(response.world_state?.entities) ? response.world_state.entities : [],
+    active_events: Array.isArray(response.world_state?.active_events) ? response.world_state.active_events : [],
+    factors: Array.isArray(response.world_state?.factors) ? response.world_state.factors : [],
+    regime_labels: Array.isArray(response.world_state?.regime_labels)
+      ? response.world_state.regime_labels
+      : ["belief-layer", "market:mixed"],
+    reasoning_summary:
+      typeof response.world_state?.reasoning_summary === "string"
+        ? response.world_state.reasoning_summary
+        : `${agentId} generated an LLM world-state interpretation.`,
+    created_at: new Date().toISOString(),
+  };
+
+  const stateValidation = validateWorldStateProposal(worldStateProposal);
+  if (!stateValidation.ok) {
+    throw new Error(`invalid_world_state_proposal:${stateValidation.errors.join(",")}`);
+  }
+
+  const hypotheses: BeliefHypothesisProposal[] = [];
+  for (const item of response.hypotheses) {
+    const signal = signalMap.get(item.source_signal_id);
+    if (!signal) {
+      continue;
+    }
+
+    let suggestedResolutionSpec: ResolutionSpec | undefined;
+    if (item.hypothesis_kind === "price_threshold") {
+      suggestedResolutionSpec = buildPriceThresholdSpec(signal) ?? undefined;
+    } else if (item.hypothesis_kind === "rate_decision") {
+      suggestedResolutionSpec = buildRateDecisionSpec(signal) ?? undefined;
+    }
+
+    const machineResolvable = Boolean(item.machine_resolvable ?? true) && Boolean(suggestedResolutionSpec);
+    const hypothesis: BeliefHypothesisProposal = {
+      id: randomUUID(),
+      run_id: runId,
+      agent_id: agentId,
+      parent_ids: [signal.id],
+      hypothesis_kind: item.hypothesis_kind,
+      category: item.category,
+      subject: item.subject,
+      predicate: item.predicate,
+      target_time: item.target_time,
+      confidence_score: clamp(Number(item.confidence_score)),
+      reasoning_summary: item.reasoning_summary,
+      source_signal_ids: [signal.id],
+      machine_resolvable: machineResolvable,
+      suggested_resolution_spec: suggestedResolutionSpec,
+      dedupe_key: buildDedupeKey({
+        kind: item.hypothesis_kind,
+        subject: item.subject,
+        predicate: item.predicate,
+        target_time: item.target_time,
+        resolution_spec: suggestedResolutionSpec ?? null,
+      }),
+      created_at: new Date().toISOString(),
+    };
+    const validation = validateBeliefHypothesisProposal(hypothesis);
+    if (validation.ok) {
+      hypotheses.push(validation.proposal);
+    }
+  }
+
+  if (hypotheses.length === 0) {
+    throw new Error("world_model_llm_produced_no_valid_hypotheses");
+  }
+
+  return {
+    worldStateProposal: stateValidation.proposal,
+    hypotheses,
+  };
+}
+
+function generateHeuristic(runId: string, triggerSignalIds: string[], signals: WorldSignal[]) {
+  const entities = buildEntities(signals);
+  const activeEvents = buildActiveEvents(signals);
+  const factors = buildFactors(signals);
+  const regimeLabels = buildRegimeLabels(factors);
+  const worldStateProposal: WorldStateProposal = {
+    id: randomUUID(),
+    run_id: runId,
+    agent_id: agentId,
+    source_signal_ids: triggerSignalIds,
+    as_of: new Date().toISOString(),
+    entities,
+    active_events: activeEvents,
+    factors,
+    regime_labels: regimeLabels,
+    reasoning_summary: `${agentId} proposed a world-state interpretation across ${signals.length} signals using the ${agentProfile} profile.`,
+    created_at: new Date().toISOString(),
+  };
+  const stateValidation = validateWorldStateProposal(worldStateProposal);
+  if (!stateValidation.ok) {
+    throw new Error(`invalid_world_state_proposal:${stateValidation.errors.join(",")}`);
+  }
+
+  return {
+    worldStateProposal: stateValidation.proposal,
+    hypotheses: buildDirectHypotheses(runId, signals, regimeLabels),
+  };
+}
+
 async function upsertWorldStateProposal(proposal: WorldStateProposal) {
   await pool.query(
     `
@@ -596,32 +776,29 @@ async function processRun(runId: string, triggerSignalIds: string[]) {
     return;
   }
 
-  const entities = buildEntities(signals);
-  const activeEvents = buildActiveEvents(signals);
-  const factors = buildFactors(signals);
-  const regimeLabels = buildRegimeLabels(factors);
-  const worldStateProposal: WorldStateProposal = {
-    id: randomUUID(),
-    run_id: runId,
-    agent_id: agentId,
-    source_signal_ids: triggerSignalIds,
-    as_of: new Date().toISOString(),
-    entities,
-    active_events: activeEvents,
-    factors,
-    regime_labels: regimeLabels,
-    reasoning_summary: `${agentId} proposed a world-state interpretation across ${signals.length} signals using the ${agentProfile} profile.`,
-    created_at: new Date().toISOString(),
-  };
-  const stateValidation = validateWorldStateProposal(worldStateProposal);
-  if (!stateValidation.ok) {
-    throw new Error(`invalid_world_state_proposal:${stateValidation.errors.join(",")}`);
+  let output:
+    | {
+        worldStateProposal: WorldStateProposal;
+        hypotheses: BeliefHypothesisProposal[];
+      }
+    | undefined;
+
+  if (mode === "llm") {
+    try {
+      output = await generateWithLlm(runId, triggerSignalIds, signals);
+    } catch (error) {
+      if (llmStrict) {
+        throw error;
+      }
+      app.log.error({ err: error }, "world-model LLM generation failed; falling back to heuristic mode");
+      output = generateHeuristic(runId, triggerSignalIds, signals);
+    }
+  } else {
+    output = generateHeuristic(runId, triggerSignalIds, signals);
   }
 
-  await upsertWorldStateProposal(stateValidation.proposal);
-
-  const hypotheses = buildDirectHypotheses(runId, signals, regimeLabels);
-  for (const hypothesis of hypotheses) {
+  await upsertWorldStateProposal(output.worldStateProposal);
+  for (const hypothesis of output.hypotheses) {
     await upsertBeliefHypothesisProposal(hypothesis);
   }
 }
@@ -653,6 +830,7 @@ app.get("/health", async () => ({
   status: "ok",
   agent_id: agentId,
   agent_profile: agentProfile,
+  mode,
   last_tick_at: lastTickAt,
   last_tick_error: lastTickError,
 }));

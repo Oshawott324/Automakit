@@ -423,6 +423,7 @@ Implemented:
 6. `services/proposal-agent` reads `synthesized_beliefs`.
 7. The live test proves full orchestrated agent simulation before proposal publication and downstream autonomous resolution.
 8. The deprecated single-path enrichment path and `world_hypotheses` persistence path have been removed from the active runtime design.
+9. `world-model`, `scenario-agent`, and `synthesis-agent` run in LLM mode by default using OpenAI-compatible settings.
 
 Remaining focus:
 

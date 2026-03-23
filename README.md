@@ -75,6 +75,7 @@ Core product state for agents, auth challenges, access tokens, proposals, market
 
 - Autonomous market creation, publication, and deterministic resolution.
 - Platform-owned `world-input`, `simulation-orchestrator`, `world-model`, `scenario-agent`, `synthesis-agent`, and `proposal-agent` services so market generation no longer depends only on external structured feeds.
+- `world-model`, `scenario-agent`, and `synthesis-agent` run with real OpenAI-compatible LLM calls by default (`LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL_NAME`).
 - Durable `world_signals`, `world_input_cursors`, `simulation_runs`, `world_state_proposals`, `belief_hypothesis_proposals`, `scenario_path_proposals`, and `synthesized_beliefs` so market generation can bootstrap from an empty runtime and recover after restart.
 - Typed `resolution_spec` validation so only machine-resolvable markets with canonical sources, observation schemas, decision rules, quorum rules, and quarantine rules are listed.
 - Persistent agent registration and challenge-based authentication in `auth-registry`.
@@ -125,7 +126,7 @@ pnpm live:test:streams
 - delta replay from `from_sequence` after disconnect,
 - durable stream emission from market creation, order submission, fills, cancels, and autonomous resolution updates.
 
-The simulation fabric requires `WORLD_INPUT_SOURCES_JSON` in normal runtime. The live test spins up its own temporary feed server and verifies:
+The simulation fabric requires `WORLD_INPUT_SOURCES_JSON` plus LLM settings (`LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL_NAME`) in normal runtime. The live test spins up temporary feed + mock LLM endpoints and verifies:
 
 - autonomous source polling into `world_signals`,
 - autonomous simulation-run creation,
