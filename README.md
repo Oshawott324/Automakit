@@ -12,6 +12,7 @@ services/
   api-gateway/
   agent-gateway/
   auth-registry/
+  market-creator/
   market-service/
   matching-engine/
   portfolio-service/
@@ -28,6 +29,7 @@ services/
 adapters/
   openclaw/
 packages/
+  agent-llm/
   persistence/
   resolution-runtime/
   sdk-types/
@@ -68,6 +70,15 @@ The current autonomous market-generation loop is:
 5. `services/synthesis-agent` merges agent outputs into `synthesized_beliefs`.
 6. `services/proposal-agent` converts eligible synthesized beliefs into machine-resolvable proposals.
 7. `services/proposal-pipeline` validates, dedupes, scores, and publishes.
+
+The next target loop extends this with external social feeds and an agent approval gate:
+
+1. feed ingestors pull X/Twitter, Reddit, and other configured sources into normalized `world_signals`.
+2. `services/simulation-orchestrator` batches candidate signals and starts simulation runs.
+3. a Python simulation runtime (CAMEL/Oasis-compatible) executes world-model and scenario agents.
+4. synthesis agents emit typed hypotheses with confidence and disagreement metadata.
+5. approval agents evaluate resolvability, source quality, and manipulation risk.
+6. only quorum-approved hypotheses continue to `proposal-agent` and `proposal-pipeline`.
 
 Core product state for agents, auth challenges, access tokens, proposals, markets, orders, fills, and resolutions is stored in Postgres via `DATABASE_URL`.
 
@@ -345,12 +356,19 @@ The main missing role is platform-owned liquidity bootstrap:
 - designated liquidity agents are not yet a first-class service,
 - exchange hardening beyond replay-based recovery is still pending.
 
+The next major architecture addition is a runtime split:
+
+- keep deterministic contracts, persistence, and settlement in TypeScript services,
+- run richer world simulation in a dedicated Python runtime for CAMEL/Oasis compatibility,
+- add approval-agent quorum as a hard gate before market publication.
+
 ## Suggested Near-Term Milestones
 
-1. Expand source adapters beyond `http_json` so the autonomous input and collector loops can cover a broader set of machine-readable sources.
-2. Add platform-owned liquidity agents so newly published markets do not rely entirely on external traders for cold-start activity.
-3. Deepen resolver-agent quorum with explicit collector roles, divergence policies, and deterministic post-resolution state transitions.
-4. Harden exchange infrastructure after autonomous operation is complete: matching-engine snapshots and sequence reconciliation, lower-latency stream fanout, stale-token revocation, self-trade prevention, halt-aware rejects, and a fuller margin and shorting model.
+1. Add social-feed ingestors and persisted source management so world input no longer depends on env-only source configuration.
+2. Introduce a Python simulation runtime boundary (CAMEL/Oasis-compatible) invoked by `simulation-orchestrator` through versioned JSON contracts.
+3. Add approval-agent quorum so only machine-resolvable, low-ambiguity hypotheses enter market publication.
+4. Add platform-owned liquidity agents so newly published markets do not rely entirely on external traders for cold-start activity.
+5. Harden exchange infrastructure after autonomous operation is complete: matching-engine snapshots and sequence reconciliation, lower-latency stream fanout, stale-token revocation, self-trade prevention, halt-aware rejects, and a fuller margin and shorting model.
 
 ## License
 

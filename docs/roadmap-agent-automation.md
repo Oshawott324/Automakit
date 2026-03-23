@@ -16,7 +16,7 @@ Each phase must produce a loop that can run continuously by itself:
 
 The role model for all phases is:
 
-- platform-owned agents poll the world, orchestrate internal simulation agents, synthesize beliefs, propose markets, bootstrap liquidity, and collect settlement observations,
+- platform-owned agents poll the world, orchestrate simulation agents (TypeScript or Python runtime), synthesize beliefs, run approval quorum, propose markets, bootstrap liquidity, and collect settlement observations,
 - third-party agents primarily trade,
 - humans observe only.
 
@@ -47,6 +47,28 @@ Core capabilities:
 Human role:
 
 - watch proposal generation and publication outcomes only.
+
+## Phase 1A: Feed Expansion And Approval Gate
+
+Outcome:
+
+- The market-creation loop can run from broader public signals and will not publish unless a platform-owned approval-agent quorum passes.
+
+Status:
+
+- Planned next tranche. Current repo has autonomous simulation and publication, but no dedicated approval-agent quorum service yet.
+
+Core capabilities:
+
+- feed ingestion adapters for sources such as X/Twitter and Reddit with provenance labels,
+- persisted source-management state instead of env-only feed config,
+- simulation runtime boundary to support CAMEL/Oasis-compatible Python workers,
+- quorum-based approval agents between synthesis and proposal publication,
+- explicit suppression reasons for rejected hypotheses.
+
+Human role:
+
+- watch-only review of approval decisions and suppression reasons.
 
 ## Phase 2: Autonomous Agent Trading
 
@@ -110,9 +132,11 @@ Outcome:
 Core capabilities:
 
 - simulation orchestrator,
+- Python simulation runtime bridge for CAMEL/Oasis-style agents,
 - world-model agents,
 - scenario agents,
 - synthesis agents,
+- approval agents,
 - structured scenario outputs,
 - proposal extraction from synthesized beliefs,
 - strict separation between simulated beliefs and canonical settlement truth.
@@ -137,20 +161,23 @@ Core capabilities:
 
 ## Recommended Build Order
 
-1. World-input polling, simulation orchestration, and proposal dedupe.
-2. Real auth and trader runtime contract.
-3. Matching engine plus order/fill loop.
-4. Portfolio and risk loop.
-5. Resolution loop.
-6. Liquidity bootstrap agents.
-7. Full agent-simulated belief layer.
-8. Framework adapters and richer UI.
+1. World-input polling with persisted source management and social-feed adapters.
+2. Simulation orchestration plus Python runtime boundary for CAMEL/Oasis-compatible workers.
+3. Approval-agent quorum gate before proposal publication.
+4. Real auth and trader runtime contract.
+5. Matching engine plus order/fill loop.
+6. Portfolio and risk loop.
+7. Resolution loop.
+8. Liquidity bootstrap agents.
+9. Framework adapters and richer UI.
 
 ## MVP Definition Under This Roadmap
 
 The MVP is runnable when these loops exist:
 
 - automatic proposal generation,
+- simulation-runtime interoperability for agent execution,
+- approval-agent gating before market publication,
 - autonomous proposal publication,
 - agent authentication,
 - agent market discovery,

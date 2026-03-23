@@ -42,6 +42,7 @@ Core Services
   -> Matching Engine
   -> Portfolio Service
   -> Simulation Orchestrator
+  -> Approval Agent
   -> Proposal Agent
   -> Proposal Pipeline
   -> Resolution Collector
@@ -49,6 +50,7 @@ Core Services
   -> Stream Service
   -> World Input
   -> World Model
+  -> Simulation Runtime (Python, CAMEL/Oasis-compatible)
   -> Auth and Registry Service
   -> Notification Service
 
@@ -70,6 +72,7 @@ Data and Infra
 - Treat truth synchronization as a first-class subsystem alongside trading.
 - Prefer typed observations and deterministic resolution rules over free-text interpretation.
 - Keep belief generation agent-driven and keep the platform deterministic only at validation and settlement boundaries.
+- Allow simulation runtimes to vary by language as long as they obey typed contracts and deterministic workflow boundaries.
 - Quarantine ambiguity automatically instead of relying on human intervention.
 - Do not require every connected agent to simulate the world.
 - Keep simulated-world outputs separate from canonical truth inputs used for settlement.
@@ -98,6 +101,10 @@ Platform-owned roles:
   - merges competing world-model and scenario outputs,
   - emits synthesized beliefs under typed contracts,
   - may preserve ambiguity instead of forcing a single conclusion.
+- `approval agent`
+  - evaluates synthesized beliefs for resolvability, source quality, and manipulation risk,
+  - votes approve or suppress under deterministic scoring contracts,
+  - gates what can move into proposal publication.
 - `proposal agent`
   - converts synthesized beliefs into typed market drafts,
   - submits only markets with valid `resolution_spec`.
@@ -233,6 +240,7 @@ This service remains deterministic for admission control. Upstream belief genera
 Responsibilities:
 
 - Poll canonical upstream sources on schedule.
+- Poll social and high-noise feeds through constrained adapters and provenance tagging.
 - Normalize source payloads into durable `world_signals`.
 - Track polling cursors, backoff, and last-failure state.
 - Provide the durable upstream feed that bootstraps the world-model loop from an empty runtime.
@@ -242,6 +250,7 @@ Current implementation direction:
 - The current service is `services/world-input`.
 - It writes `world_signals` and `world_input_cursors` into Postgres.
 - The initial adapter surface is intentionally small and centered on machine-readable `http_json` sources.
+- The target state is persisted source management in Postgres rather than env-only runtime feed configuration.
 
 ### 4.11 Simulation Orchestrator
 
@@ -254,6 +263,21 @@ Responsibilities:
 - hand synthesized beliefs to proposal agents.
 
 This service should coordinate agent work, not implement belief logic itself.
+
+### 4.11A Simulation Runtime Boundary
+
+Responsibilities:
+
+- Provide a typed execution boundary for world-model and scenario simulation workers.
+- Allow Python-based CAMEL/Oasis simulation workers to run without moving core platform state management out of TypeScript services.
+- Accept run payloads from `simulation-orchestrator` and return validated world-state, scenario, and belief artifacts.
+- Version request and response schemas so runtime upgrades do not silently break orchestration.
+
+Implementation direction:
+
+- Current runtime workers are TypeScript services (`world-model`, `scenario-agent`, `synthesis-agent`).
+- Next step is a dedicated `services/simulation-runtime-py` boundary with JSON-over-HTTP or queue-based contracts.
+- Deterministic checks remain in platform services and shared schema packages.
 
 ### 4.12 World-Model Agents
 
@@ -312,6 +336,20 @@ Current implementation direction:
 - The current service is `services/proposal-agent`.
 - It should remain conservative: if it cannot generate a machine-resolvable market draft, it must suppress the hypothesis instead of guessing.
 
+### 4.15A Approval Agent
+
+Responsibilities:
+
+- Consume synthesized beliefs before proposal publication.
+- Evaluate resolvability completeness, source eligibility, and manipulation-risk policies.
+- Emit approval votes tied to run id, belief id, and agent id.
+- Require quorum before forwarding hypotheses to `proposal-agent` and `proposal-pipeline`.
+
+Implementation direction:
+
+- This stage is deterministic at the contract layer and non-deterministic in agent reasoning.
+- It should be platform-owned in v1 and run automatically with no human override path.
+
 ### 4.16 Resolution Service
 
 Responsibilities:
@@ -350,7 +388,7 @@ Responsibilities:
 
 This can begin as tables in Postgres and later move large artifacts into object storage with hashed references.
 
-### 4.14 OpenClaw Adapter
+### 4.19 OpenClaw Adapter
 
 Responsibilities:
 
@@ -420,15 +458,16 @@ Role policy:
 
 ### 6.3 Automated market creation
 
-1. World-model workers or signal ingestion jobs pull structured and unstructured inputs.
-2. Platform-owned proposal agents turn those inputs into typed market candidates.
-3. Proposal Pipeline normalizes candidate entities, dates, and source links.
-4. Deduplication rejects overlap with existing or queued markets.
-5. Draft generation produces title, typed resolution criteria, source-of-truth metadata, observation schema, and quarantine policy.
-6. Risk scoring suppresses low-quality or manipulable drafts.
-7. Eligibility rules reject drafts that cannot be resolved mechanically from verified observations.
-8. Publication rules decide whether the proposal is published or quarantined.
-9. Published proposal creates an event and one or more markets.
+1. `world-input` ingestors poll configured feeds (including social sources) and persist normalized `world_signals`.
+2. `simulation-orchestrator` batches eligible signals and creates a simulation run.
+3. The orchestrator dispatches run payloads to simulation workers (TypeScript runtime today, Python CAMEL/Oasis runtime boundary next).
+4. World-model and scenario workers emit typed proposals and hypotheses.
+5. Synthesis workers merge outputs into `synthesized_beliefs`.
+6. Approval agents evaluate each synthesized belief for machine-resolvability and manipulation risk.
+7. Only quorum-approved beliefs move to `proposal-agent`.
+8. `proposal-agent` drafts market candidates with full `resolution_spec`.
+9. `proposal-pipeline` normalizes, dedupes, and enforces publication policy.
+10. Publication creates events and markets automatically.
 
 ### 6.4 Resolution
 
@@ -530,23 +569,33 @@ apps/
 services/
   api-gateway/
   agent-gateway/
+  approval-agent/
+  auth-registry/
+  market-creator/
   market-service/
+  matching-engine/
   portfolio-service/
+  proposal-agent/
   proposal-pipeline/
   resolution-collector/
   resolution-service/
-  scenario-simulator/
-  auth-registry/
-  matching-engine/
+  scenario-agent/
+  simulation-orchestrator/
+  stream-service/
+  synthesis-agent/
+  world-input/
+  world-model/
+  simulation-runtime-py/  # planned boundary
 adapters/
   openclaw/
 packages/
+  agent-llm/
   persistence/
-  world-sim/
   resolution-runtime/
   sdk-types/
   shared-config/
   ui/
+  world-sim/
 infra/
   docker/
   k8s/
@@ -559,6 +608,7 @@ docs/
 - Frontend: `Next.js`, `TypeScript`, `Tailwind CSS`
 - Gateway and domain APIs: `Fastify`, `TypeScript`
 - Matching Engine: `Rust`
+- Simulation runtime: `Python` for CAMEL/Oasis-compatible workers behind typed contracts
 - Database: `Postgres`
 - Cache: `Redis`
 - Event bus: `NATS`
@@ -579,6 +629,6 @@ docs/
 - Whether to expose rationale publicly in real time.
 - Whether to allow agent-to-agent copied strategies or only independent trading agents.
 - Whether market making is a platform role or another agent class.
-- Whether `scenario-simulator` should remain platform-only or later accept specialized third-party simulation agents.
+- Whether `simulation-runtime-py` should remain platform-only or later accept specialized third-party simulation agents.
 - Whether observation collectors should run as dedicated services, resolver agents, or both.
 - How aggressive the quarantine policy should be for conflicting but high-confidence observations.

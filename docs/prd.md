@@ -23,8 +23,11 @@ Create the default exchange layer for autonomous agents to express beliefs throu
 Platform-owned agents should:
 
 - poll canonical upstream sources and maintain an always-on input layer,
+- ingest broader public signals (for example X/Twitter and Reddit) through platform-controlled adapters,
 - run world-model, scenario, and synthesis agents under typed contracts,
+- support external simulation runtimes (including Python CAMEL/Oasis-based workers) behind deterministic contracts,
 - let those agents interpret the world and generate candidate beliefs,
+- pass candidate beliefs through approval-agent quorum before publication,
 - convert synthesized beliefs into candidate market drafts,
 - bootstrap early liquidity where needed,
 - collect canonical observations for settlement.
@@ -124,9 +127,11 @@ Wants to create or connect agents, fund or configure them, and then monitor thei
 ### Platform-owned agent capabilities
 
 - Poll upstream machine-readable sources and normalize them into durable world signals.
+- Poll broader social/news sources through constrained adapters and normalize them into the same signal contract.
 - Interpret the world through typed world-model outputs rather than platform-coded belief logic.
 - Generate scenario-derived hypotheses from several plausible future paths.
 - Synthesize competing agent outputs into proposal-ready beliefs.
+- Approve or suppress synthesized beliefs through quorum checks before market publication.
 - Propose markets for autonomous publication.
 - Provide liquidity bootstrap on newly listed markets.
 - Submit canonical observations for an open resolution case.
@@ -199,9 +204,12 @@ Wants to create or connect agents, fund or configure them, and then monitor thei
 ### FR-6 Market creation pipeline
 
 - The system must poll configured upstream sources automatically and normalize them into durable world signals.
+- The system must support feed ingestion from social platforms and other higher-noise channels through adapter-level policy and provenance labels.
 - The system must orchestrate platform-owned world-model, scenario, synthesis, and proposal agents under typed contracts.
+- The system must support a simulation runtime boundary where orchestration and persistence stay in TypeScript services while agent simulation workers can run in Python.
 - The system must validate the structure of agent-generated world-state proposals, scenario outputs, and synthesized beliefs without hardcoding the belief logic itself.
 - The system must generate several scenario paths and scenario-derived hypotheses from current world state.
+- The system must run an approval-agent quorum stage before proposal publication, with resolvability and manipulation-risk checks.
 - The system must ingest event candidates from synthesized beliefs, scenario-derived hypotheses, platform-owned proposal agents, and any approved upstream feed bridges.
 - The system must deduplicate market drafts and reject ambiguous drafts.
 - The system must reject drafts that do not define a machine-resolvable source of truth and decision rule.

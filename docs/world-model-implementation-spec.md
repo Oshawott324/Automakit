@@ -14,9 +14,11 @@ The target system should:
 The new upstream loop should be built around:
 
 - `simulation-orchestrator`
+- `simulation runtime boundary` (TypeScript and/or Python CAMEL/Oasis workers)
 - `world-model agents`
 - `scenario agents`
 - `synthesis agents`
+- `approval agents`
 - `proposal agents`
 - deterministic boundary contracts only
 
@@ -63,13 +65,15 @@ These parts should be agent-driven rather than hardcoded:
 
 The upgraded upstream loop should be:
 
-1. `world-input` polls canonical upstream sources and writes `world_signals`.
+1. `world-input` polls configured upstream sources (including social feeds) and writes `world_signals`.
 2. `simulation-orchestrator` selects which simulation tasks to run.
-3. `world-model agents` interpret fresh signals and emit proposed `world_state` updates and direct hypotheses.
-4. `scenario agents` consume current world state and generate several future paths.
-5. `synthesis agents` merge direct and scenario outputs into typed `belief_hypotheses`.
-6. `proposal agents` convert eligible hypotheses into candidate markets.
-7. `proposal-pipeline` validates, dedupes, scores, and publishes or suppresses.
+3. `simulation-orchestrator` dispatches run payloads to simulation workers (TypeScript runtime today, Python runtime boundary next).
+4. `world-model agents` interpret fresh signals and emit proposed `world_state` updates and direct hypotheses.
+5. `scenario agents` consume current world state and generate several future paths.
+6. `synthesis agents` merge direct and scenario outputs into typed `belief_hypotheses`.
+7. `approval agents` score resolvability and manipulation risk; only quorum-approved beliefs continue.
+8. `proposal agents` convert approved hypotheses into candidate markets.
+9. `proposal-pipeline` validates, dedupes, scores, and publishes or suppresses.
 
 Settlement remains downstream and separate:
 
@@ -93,6 +97,16 @@ Responsibilities:
 - move tasks through deterministic state transitions
 
 This service should not decide beliefs. It should coordinate agents that do.
+
+### 5.1A `services/simulation-runtime-py` (planned)
+
+Responsibilities:
+
+- Execute CAMEL/Oasis-compatible simulation workers under versioned contracts.
+- Accept `SimulationRunRequest` payloads and return typed world-model/scenario artifacts.
+- Keep prompting and tool wiring in the simulation runtime while leaving deterministic validation to platform services.
+
+This service is a runtime boundary, not a source of truth.
 
 ### 5.2 `world-model agents`
 
@@ -129,7 +143,18 @@ Responsibilities:
 
 This layer lets the system benefit from multiple agents without forcing the platform itself to “think.”
 
-### 5.5 `proposal agents`
+### 5.5 `approval agents`
+
+Responsibilities:
+
+- consume synthesized hypotheses,
+- evaluate resolvability completeness and source quality,
+- score manipulation risk and ambiguity,
+- vote `approve` or `suppress` with structured reasons.
+
+Only quorum-approved hypotheses may proceed to proposal drafting.
+
+### 5.6 `proposal agents`
 
 Responsibilities:
 
@@ -242,6 +267,21 @@ export type SynthesizedBelief = {
 };
 ```
 
+### 6.6 Approval decision contract
+
+```ts
+export type ApprovalDecision = {
+  id: string;
+  run_id: string;
+  belief_id: string;
+  agent_id: string;
+  decision: "approve" | "suppress";
+  score: number;
+  reasons: string[];
+  created_at: string;
+};
+```
+
 These contracts should be validated structurally by the platform. The contents are still agent-generated.
 
 ## 7. Persistence Model
@@ -344,8 +384,9 @@ The legacy `world_hypotheses` table and the old single-path enrichment contract 
 4. wait for minimum required outputs
 5. dispatch tasks to `scenario agents`
 6. dispatch tasks to `synthesis agents`
-7. store final `synthesized_beliefs`
-8. hand eligible beliefs to `proposal-agent`
+7. dispatch tasks to `approval agents`
+8. store final `synthesized_beliefs` and `approval_decisions`
+9. hand quorum-approved beliefs to `proposal-agent`
 
 ### 8.2 Deterministic orchestration state
 
@@ -355,6 +396,7 @@ Only the workflow transitions should be platform-controlled:
 - `dispatched`
 - `collecting_outputs`
 - `synthesizing`
+- `approval`
 - `ready_for_proposal`
 - `failed`
 
@@ -380,6 +422,7 @@ Platform-owned upstream roles should be explicit:
 - `world_model`
 - `scenario`
 - `synthesis`
+- `approval`
 - `proposal`
 
 Each should have:
@@ -400,8 +443,9 @@ This design is not implemented until a live test proves:
 3. at least two `world-model agents` submit state or direct hypotheses.
 4. at least two `scenario agents` submit future paths.
 5. at least one `synthesis agent` emits `synthesized_beliefs`.
-6. `proposal-agent` publishes at least one market from synthesized output.
-7. the market still resolves only through canonical sources and `resolution-service`.
+6. at least one `approval agent` emits a structured approval decision.
+7. `proposal-agent` publishes at least one market from quorum-approved synthesized output.
+8. the market still resolves only through canonical sources and `resolution-service`.
 
 ## 12. Guardrails
 
@@ -424,9 +468,12 @@ Implemented:
 7. The live test proves full orchestrated agent simulation before proposal publication and downstream autonomous resolution.
 8. The deprecated single-path enrichment path and `world_hypotheses` persistence path have been removed from the active runtime design.
 9. `world-model`, `scenario-agent`, and `synthesis-agent` run in LLM mode by default using OpenAI-compatible settings.
+10. deterministic contract validation remains in shared TypeScript packages; simulation runtime language can vary.
 
 Remaining focus:
 
-1. broader source-adapter coverage,
-2. platform-owned liquidity bootstrap,
-3. further exchange hardening beyond replay-based recovery.
+1. broader source-adapter coverage including social ingestion,
+2. dedicated approval-agent quorum stage before proposal publication,
+3. Python simulation runtime boundary for CAMEL/Oasis-compatible workers,
+4. platform-owned liquidity bootstrap,
+5. further exchange hardening beyond replay-based recovery.
