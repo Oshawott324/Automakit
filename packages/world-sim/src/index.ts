@@ -51,46 +51,129 @@ export type WorldInputCursor = {
   updated_at: string;
 };
 
-export type PriceThresholdHypothesisMetadata = {
-  kind: "price_threshold";
-  asset_symbol: string;
-  threshold: number;
-  operator: "gt" | "gte" | "lt" | "lte";
-  canonical_source_url: string;
-  category: string;
+export type WorldInputSourceConfig = {
+  key: string;
+  adapter: SourceAdapterKind;
+  url?: string;
+  poll_interval_seconds: number;
+  backfill_hours?: number;
+  trust_tier: TrustTier;
 };
 
-export type RateDecisionHypothesisMetadata = {
-  kind: "rate_decision";
-  institution: string;
-  direction: "cut" | "hold" | "hike";
-  canonical_source_url: string;
-  category: string;
-};
+export type SimulationRunType = "belief_refresh";
+export type SimulationRunStatus =
+  | "world_model_pending"
+  | "scenario_pending"
+  | "synthesis_pending"
+  | "ready_for_proposal"
+  | "completed"
+  | "failed";
 
-export type SuggestedResolutionMetadata =
-  | PriceThresholdHypothesisMetadata
-  | RateDecisionHypothesisMetadata;
-
-export type WorldHypothesisStatus = "new" | "proposed" | "suppressed";
-
-export type WorldHypothesis = {
+export type WorldEntityState = {
   id: string;
+  kind: WorldEntityRef["kind"];
+  name: string;
+  attributes: Record<string, unknown>;
+};
+
+export type ActiveWorldEvent = {
+  id: string;
+  title: string;
+  event_type: string;
+  effective_at?: string | null;
   source_signal_ids: string[];
+};
+
+export type WorldFactorState = {
+  factor: string;
+  value: number;
+  direction: "up" | "down" | "flat";
+  rationale: string;
+};
+
+export type WorldStateProposal = {
+  id: string;
+  run_id: string;
+  agent_id: string;
+  source_signal_ids: string[];
+  as_of: string;
+  entities: WorldEntityState[];
+  active_events: ActiveWorldEvent[];
+  factors: WorldFactorState[];
+  regime_labels: string[];
+  reasoning_summary: string;
+  created_at: string;
+};
+
+export type ScenarioEvent = {
+  id: string;
+  title: string;
+  event_type: string;
+  description: string;
+  effective_at?: string | null;
+};
+
+export type ScenarioPathHypothesis = {
+  key: string;
+  hypothesis_kind: ResolutionKind;
   category: string;
   subject: string;
   predicate: string;
   target_time: string;
   confidence_score: number;
   reasoning_summary: string;
+  source_signal_ids: string[];
   machine_resolvable: boolean;
-  suggested_resolution_kind?: ResolutionKind;
-  suggested_resolution_source_url?: string;
-  suggested_resolution_metadata?: SuggestedResolutionMetadata;
-  status: WorldHypothesisStatus;
+  suggested_resolution_spec?: ResolutionSpec;
+};
+
+export type ScenarioPathProposal = {
+  id: string;
+  run_id: string;
+  agent_id: string;
+  label: "base" | "bull" | "bear" | "stress" | string;
+  probability: number;
+  narrative: string;
+  factor_deltas: Record<string, unknown>;
+  path_events: ScenarioEvent[];
+  path_hypotheses: ScenarioPathHypothesis[];
+  created_at: string;
+};
+
+export type BeliefHypothesisProposal = {
+  id: string;
+  run_id: string;
+  agent_id: string;
+  parent_ids: string[];
+  hypothesis_kind: ResolutionKind;
+  category: string;
+  subject: string;
+  predicate: string;
+  target_time: string;
+  confidence_score: number;
+  reasoning_summary: string;
+  source_signal_ids: string[];
+  machine_resolvable: boolean;
+  suggested_resolution_spec?: ResolutionSpec;
+  dedupe_key: string;
+  created_at: string;
+};
+
+export type SynthesizedBeliefStatus = "new" | "ambiguous" | "proposed" | "suppressed";
+
+export type SynthesizedBelief = {
+  id: string;
+  run_id: string;
+  agent_id: string;
+  parent_hypothesis_ids: string[];
+  agreement_score: number;
+  disagreement_score: number;
+  confidence_score: number;
+  conflict_notes?: string | null;
+  hypothesis: BeliefHypothesisProposal;
+  status: SynthesizedBeliefStatus;
   suppression_reason?: string | null;
   linked_proposal_id?: string | null;
-  dedupe_key: string;
   created_at: string;
   updated_at: string;
 };
@@ -102,16 +185,7 @@ export type ProposalCandidate = {
   resolution_criteria: string;
   resolution_spec: ResolutionSpec;
   dedupe_key: string;
-  source_hypothesis_id: string;
-};
-
-export type WorldInputSourceConfig = {
-  key: string;
-  adapter: SourceAdapterKind;
-  url?: string;
-  poll_interval_seconds: number;
-  backfill_hours?: number;
-  trust_tier: TrustTier;
+  source_belief_id: string;
 };
 
 export function buildDedupeKey(value: unknown) {
@@ -250,36 +324,140 @@ export function validateWorldSignal(signal: unknown) {
     : { ok: true as const, signal: candidate as WorldSignal };
 }
 
-export function validateWorldHypothesis(hypothesis: unknown) {
+function isResolutionKind(value: unknown): value is ResolutionKind {
+  return (
+    value === "price_threshold" ||
+    value === "rate_decision" ||
+    value === "filing_detected" ||
+    value === "game_result"
+  );
+}
+
+export function validateWorldStateProposal(proposal: unknown) {
   const errors: string[] = [];
-  if (!hypothesis || typeof hypothesis !== "object") {
-    return { ok: false as const, errors: ["world_hypothesis_must_be_object"] };
+  if (!proposal || typeof proposal !== "object") {
+    return { ok: false as const, errors: ["world_state_proposal_must_be_object"] };
   }
 
-  const candidate = hypothesis as Partial<WorldHypothesis>;
+  const candidate = proposal as Partial<WorldStateProposal>;
   if (!candidate.id) {
-    errors.push("world_hypothesis_id_required");
+    errors.push("world_state_proposal_id_required");
+  }
+  if (!candidate.run_id) {
+    errors.push("world_state_proposal_run_id_required");
+  }
+  if (!candidate.agent_id) {
+    errors.push("world_state_proposal_agent_id_required");
   }
   if (!candidate.source_signal_ids?.length) {
-    errors.push("world_hypothesis_source_signal_ids_required");
+    errors.push("world_state_proposal_source_signal_ids_required");
   }
-  if (!candidate.subject) {
-    errors.push("world_hypothesis_subject_required");
+  if (!candidate.as_of) {
+    errors.push("world_state_proposal_as_of_required");
   }
-  if (!candidate.predicate) {
-    errors.push("world_hypothesis_predicate_required");
-  }
-  if (!candidate.target_time) {
-    errors.push("world_hypothesis_target_time_required");
-  }
-  if (typeof candidate.machine_resolvable !== "boolean") {
-    errors.push("world_hypothesis_machine_resolvable_required");
-  }
-  if (!candidate.dedupe_key) {
-    errors.push("world_hypothesis_dedupe_key_required");
+  if (!Array.isArray(candidate.entities)) {
+    errors.push("world_state_proposal_entities_required");
   }
 
   return errors.length > 0
     ? { ok: false as const, errors }
-    : { ok: true as const, hypothesis: candidate as WorldHypothesis };
+    : { ok: true as const, proposal: candidate as WorldStateProposal };
+}
+
+export function validateScenarioPathProposal(proposal: unknown) {
+  const errors: string[] = [];
+  if (!proposal || typeof proposal !== "object") {
+    return { ok: false as const, errors: ["scenario_path_proposal_must_be_object"] };
+  }
+
+  const candidate = proposal as Partial<ScenarioPathProposal>;
+  if (!candidate.id) {
+    errors.push("scenario_path_proposal_id_required");
+  }
+  if (!candidate.run_id) {
+    errors.push("scenario_path_proposal_run_id_required");
+  }
+  if (!candidate.agent_id) {
+    errors.push("scenario_path_proposal_agent_id_required");
+  }
+  if (!candidate.label) {
+    errors.push("scenario_path_proposal_label_required");
+  }
+  if (typeof candidate.probability !== "number" || !Number.isFinite(candidate.probability)) {
+    errors.push("scenario_path_proposal_probability_required");
+  }
+  if (!Array.isArray(candidate.path_hypotheses)) {
+    errors.push("scenario_path_proposal_path_hypotheses_required");
+  }
+
+  return errors.length > 0
+    ? { ok: false as const, errors }
+    : { ok: true as const, proposal: candidate as ScenarioPathProposal };
+}
+
+export function validateBeliefHypothesisProposal(proposal: unknown) {
+  const errors: string[] = [];
+  if (!proposal || typeof proposal !== "object") {
+    return { ok: false as const, errors: ["belief_hypothesis_proposal_must_be_object"] };
+  }
+
+  const candidate = proposal as Partial<BeliefHypothesisProposal>;
+  if (!candidate.id) {
+    errors.push("belief_hypothesis_proposal_id_required");
+  }
+  if (!candidate.run_id) {
+    errors.push("belief_hypothesis_proposal_run_id_required");
+  }
+  if (!candidate.agent_id) {
+    errors.push("belief_hypothesis_proposal_agent_id_required");
+  }
+  if (!isResolutionKind(candidate.hypothesis_kind)) {
+    errors.push("belief_hypothesis_proposal_kind_invalid");
+  }
+  if (!candidate.subject) {
+    errors.push("belief_hypothesis_proposal_subject_required");
+  }
+  if (!candidate.target_time) {
+    errors.push("belief_hypothesis_proposal_target_time_required");
+  }
+  if (typeof candidate.confidence_score !== "number" || !Number.isFinite(candidate.confidence_score)) {
+    errors.push("belief_hypothesis_proposal_confidence_required");
+  }
+  if (!candidate.dedupe_key) {
+    errors.push("belief_hypothesis_proposal_dedupe_key_required");
+  }
+
+  return errors.length > 0
+    ? { ok: false as const, errors }
+    : { ok: true as const, proposal: candidate as BeliefHypothesisProposal };
+}
+
+export function validateSynthesizedBelief(belief: unknown) {
+  const errors: string[] = [];
+  if (!belief || typeof belief !== "object") {
+    return { ok: false as const, errors: ["synthesized_belief_must_be_object"] };
+  }
+
+  const candidate = belief as Partial<SynthesizedBelief>;
+  if (!candidate.id) {
+    errors.push("synthesized_belief_id_required");
+  }
+  if (!candidate.run_id) {
+    errors.push("synthesized_belief_run_id_required");
+  }
+  if (!candidate.agent_id) {
+    errors.push("synthesized_belief_agent_id_required");
+  }
+  if (!candidate.hypothesis) {
+    errors.push("synthesized_belief_hypothesis_required");
+  } else {
+    const nestedValidation = validateBeliefHypothesisProposal(candidate.hypothesis);
+    if (!nestedValidation.ok) {
+      errors.push(...nestedValidation.errors.map((entry) => `synthesized_${entry}`));
+    }
+  }
+
+  return errors.length > 0
+    ? { ok: false as const, errors }
+    : { ok: true as const, belief: candidate as SynthesizedBelief };
 }

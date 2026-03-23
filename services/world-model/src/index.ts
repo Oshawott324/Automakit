@@ -1,17 +1,28 @@
 import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
 import { createDatabasePool, ensureCoreSchema, parseJsonField, toIsoTimestamp } from "@automakit/persistence";
-import type { ResolutionKind } from "@automakit/sdk-types";
+import type { ResolutionSpec } from "@automakit/sdk-types";
 import {
   buildDedupeKey,
-  type PriceThresholdHypothesisMetadata,
-  type RateDecisionHypothesisMetadata,
-  type SuggestedResolutionMetadata,
+  normalizeAllowedDomainsFromUrl,
+  type ActiveWorldEvent,
+  type BeliefHypothesisProposal,
+  type SimulationRunStatus,
   type WorldEntityRef,
-  type WorldHypothesis,
+  type WorldEntityState,
+  type WorldFactorState,
   type WorldSignal,
-  validateWorldHypothesis,
+  type WorldStateProposal,
+  validateBeliefHypothesisProposal,
+  validateWorldStateProposal,
 } from "@automakit/world-sim";
+
+type SimulationRunRow = {
+  id: string;
+  trigger_signal_ids: unknown;
+  status: SimulationRunStatus;
+  started_at: unknown;
+};
 
 type WorldSignalRow = {
   id: string;
@@ -30,42 +41,44 @@ type WorldSignalRow = {
   created_at: unknown;
 };
 
-type WorldHypothesisRow = {
+type WorldStateProposalRow = {
   id: string;
+  run_id: string;
+  agent_id: string;
   source_signal_ids: unknown;
+  as_of: unknown;
+  entities: unknown;
+  active_events: unknown;
+  factors: unknown;
+  regime_labels: unknown;
+  reasoning_summary: string;
+  created_at: unknown;
+};
+
+type BeliefHypothesisProposalRow = {
+  id: string;
+  run_id: string;
+  agent_id: string;
+  parent_ids: unknown;
+  hypothesis_kind: BeliefHypothesisProposal["hypothesis_kind"];
   category: string;
   subject: string;
   predicate: string;
   target_time: unknown;
   confidence_score: unknown;
   reasoning_summary: string;
+  source_signal_ids: unknown;
   machine_resolvable: boolean;
-  suggested_resolution_kind: ResolutionKind | null;
-  suggested_resolution_source_url: string | null;
-  suggested_resolution_metadata: unknown;
-  status: WorldHypothesis["status"];
-  suppression_reason: string | null;
-  linked_proposal_id: string | null;
+  suggested_resolution_spec: unknown;
   dedupe_key: string;
   created_at: unknown;
-  updated_at: unknown;
-};
-
-type DerivedHypothesis = {
-  category: string;
-  subject: string;
-  predicate: string;
-  target_time: string;
-  machine_resolvable: boolean;
-  suggested_resolution_kind?: ResolutionKind;
-  suggested_resolution_source_url?: string;
-  suggested_resolution_metadata?: SuggestedResolutionMetadata;
-  suppression_reason: string | null;
 };
 
 const port = Number(process.env.WORLD_MODEL_PORT ?? 4011);
 const intervalMs = Number(process.env.WORLD_MODEL_INTERVAL_MS ?? 1000);
-const batchSize = Number(process.env.WORLD_MODEL_BATCH_SIZE ?? 100);
+const batchSize = Number(process.env.WORLD_MODEL_BATCH_SIZE ?? 10);
+const agentId = process.env.WORLD_MODEL_AGENT_ID ?? "world-model-alpha";
+const agentProfile = process.env.WORLD_MODEL_AGENT_PROFILE ?? "macro";
 const app = Fastify({ logger: true });
 const pool = createDatabasePool();
 
@@ -92,55 +105,191 @@ function mapSignalRow(row: WorldSignalRow): WorldSignal {
   };
 }
 
-function mapHypothesisRow(row: WorldHypothesisRow): WorldHypothesis {
+function mapWorldStateProposalRow(row: WorldStateProposalRow): WorldStateProposal {
   return {
     id: row.id,
+    run_id: row.run_id,
+    agent_id: row.agent_id,
     source_signal_ids: parseJsonField<string[]>(row.source_signal_ids),
+    as_of: toIsoTimestamp(row.as_of),
+    entities: parseJsonField<WorldEntityState[]>(row.entities),
+    active_events: parseJsonField<ActiveWorldEvent[]>(row.active_events),
+    factors: parseJsonField<WorldFactorState[]>(row.factors),
+    regime_labels: parseJsonField<string[]>(row.regime_labels),
+    reasoning_summary: row.reasoning_summary,
+    created_at: toIsoTimestamp(row.created_at),
+  };
+}
+
+function mapHypothesisProposalRow(row: BeliefHypothesisProposalRow): BeliefHypothesisProposal {
+  return {
+    id: row.id,
+    run_id: row.run_id,
+    agent_id: row.agent_id,
+    parent_ids: parseJsonField<string[]>(row.parent_ids),
+    hypothesis_kind: row.hypothesis_kind,
     category: row.category,
     subject: row.subject,
     predicate: row.predicate,
     target_time: toIsoTimestamp(row.target_time),
     confidence_score: Number(row.confidence_score),
     reasoning_summary: row.reasoning_summary,
+    source_signal_ids: parseJsonField<string[]>(row.source_signal_ids),
     machine_resolvable: Boolean(row.machine_resolvable),
-    suggested_resolution_kind: row.suggested_resolution_kind ?? undefined,
-    suggested_resolution_source_url: row.suggested_resolution_source_url ?? undefined,
-    suggested_resolution_metadata: row.suggested_resolution_metadata
-      ? parseJsonField<SuggestedResolutionMetadata>(row.suggested_resolution_metadata)
+    suggested_resolution_spec: row.suggested_resolution_spec
+      ? parseJsonField<ResolutionSpec>(row.suggested_resolution_spec)
       : undefined,
-    status: row.status,
-    suppression_reason: row.suppression_reason,
-    linked_proposal_id: row.linked_proposal_id,
     dedupe_key: row.dedupe_key,
     created_at: toIsoTimestamp(row.created_at),
-    updated_at: toIsoTimestamp(row.updated_at),
   };
 }
 
-function baseConfidenceForTrustTier(signal: WorldSignal) {
-  switch (signal.trust_tier) {
-    case "official":
-      return 0.84;
-    case "exchange":
-      return 0.82;
-    case "curated":
-      return 0.68;
-    case "derived":
-      return 0.55;
-    default:
-      return 0.5;
+async function fetchRunsNeedingAgentOutput(limit: number) {
+  const result = await pool.query<SimulationRunRow>(
+    `
+      SELECT id, trigger_signal_ids, status, started_at
+      FROM simulation_runs
+      WHERE status = 'world_model_pending'
+        AND NOT EXISTS (
+          SELECT 1
+          FROM world_state_proposals
+          WHERE world_state_proposals.run_id = simulation_runs.id
+            AND world_state_proposals.agent_id = $1
+        )
+      ORDER BY started_at ASC, id ASC
+      LIMIT $2
+    `,
+    [agentId, limit],
+  );
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    trigger_signal_ids: parseJsonField<string[]>(row.trigger_signal_ids),
+    status: row.status,
+    started_at: toIsoTimestamp(row.started_at),
+  }));
+}
+
+async function fetchSignals(signalIds: string[]) {
+  if (signalIds.length === 0) {
+    return [];
   }
+
+  const result = await pool.query<WorldSignalRow>(
+    `
+      SELECT *
+      FROM world_signals
+      WHERE id = ANY($1::text[])
+      ORDER BY created_at ASC, id ASC
+    `,
+    [signalIds],
+  );
+
+  return result.rows.map(mapSignalRow);
 }
 
-function findEntityValue(signal: WorldSignal, kind: WorldEntityRef["kind"]) {
-  return signal.entity_refs.find((entry) => entry.kind === kind)?.value;
+function clamp(value: number, min = 0.05, max = 0.95) {
+  return Math.max(min, Math.min(max, value));
 }
 
-function derivePriceThresholdHypothesis(signal: WorldSignal) {
+function uniqueBy<T>(values: T[], keyFn: (value: T) => string) {
+  const seen = new Set<string>();
+  const output: T[] = [];
+  for (const value of values) {
+    const key = keyFn(value);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    output.push(value);
+  }
+  return output;
+}
+
+function buildEntities(signals: WorldSignal[]) {
+  const entities: WorldEntityState[] = [];
+
+  for (const signal of signals) {
+    for (const entry of signal.entity_refs) {
+      entities.push({
+        id: `${entry.kind}:${entry.value}`,
+        kind: entry.kind,
+        name: entry.value,
+        attributes: {
+          source_signal_id: signal.id,
+          source_type: signal.source_type,
+        },
+      });
+    }
+  }
+
+  return uniqueBy(entities, (entity) => entity.id);
+}
+
+function buildActiveEvents(signals: WorldSignal[]): ActiveWorldEvent[] {
+  return signals.map((signal) => ({
+    id: signal.id,
+    title: signal.title,
+    event_type: signal.payload.kind && typeof signal.payload.kind === "string" ? signal.payload.kind : signal.source_type,
+    effective_at: signal.effective_at ?? null,
+    source_signal_ids: [signal.id],
+  }));
+}
+
+function buildFactors(signals: WorldSignal[]) {
+  const hasPriceSignal = signals.some((signal) => signal.source_type === "price_feed");
+  const hasCalendarSignal = signals.some((signal) => signal.source_type === "economic_calendar");
+
+  const factors: WorldFactorState[] = [];
+  if (hasPriceSignal) {
+    factors.push({
+      factor: "risk_appetite",
+      value: agentProfile === "market" ? 0.82 : 0.7,
+      direction: "up",
+      rationale: `${agentId} observed price-sensitive momentum across market signals.`,
+    });
+  }
+  if (hasCalendarSignal) {
+    factors.push({
+      factor: "policy_easing_bias",
+      value: agentProfile === "macro" ? 0.8 : 0.68,
+      direction: "up",
+      rationale: `${agentId} inferred easing pressure from calendar and policy signals.`,
+    });
+  }
+  if (!hasPriceSignal && !hasCalendarSignal) {
+    factors.push({
+      factor: "mixed_context",
+      value: 0.5,
+      direction: "flat",
+      rationale: `${agentId} found mixed inputs and no dominant factor.`,
+    });
+  }
+
+  return factors;
+}
+
+function buildRegimeLabels(factors: WorldFactorState[]) {
+  const labels = ["belief-layer"];
+  for (const factor of factors) {
+    if (factor.factor === "risk_appetite" && factor.value >= 0.7) {
+      labels.push("market:risk_on");
+    }
+    if (factor.factor === "policy_easing_bias" && factor.value >= 0.7) {
+      labels.push("macro:easing_bias");
+    }
+  }
+
+  if (labels.length === 1) {
+    labels.push("market:mixed");
+  }
+
+  return labels;
+}
+
+function buildPriceThresholdSpec(signal: WorldSignal): ResolutionSpec | null {
   const assetSymbol =
-    typeof signal.payload.asset_symbol === "string"
-      ? signal.payload.asset_symbol
-      : findEntityValue(signal, "asset");
+    typeof signal.payload.asset_symbol === "string" ? signal.payload.asset_symbol : undefined;
   const threshold = Number(signal.payload.threshold);
   const operator =
     signal.payload.operator === "gte" ||
@@ -148,238 +297,333 @@ function derivePriceThresholdHypothesis(signal: WorldSignal) {
     signal.payload.operator === "lte"
       ? signal.payload.operator
       : "gt";
-  const targetTime =
-    typeof signal.payload.target_time === "string" ? signal.payload.target_time : signal.effective_at;
   const canonicalSourceUrl =
-    typeof signal.payload.canonical_source_url === "string"
-      ? signal.payload.canonical_source_url
-      : signal.source_url;
-  const category =
-    typeof signal.payload.category === "string" && signal.payload.category.length > 0
-      ? signal.payload.category
-      : "crypto";
-  const machineResolvable =
-    typeof assetSymbol === "string" &&
-    assetSymbol.length > 0 &&
-    Number.isFinite(threshold) &&
-    typeof targetTime === "string" &&
-    typeof canonicalSourceUrl === "string";
+    typeof signal.payload.canonical_source_url === "string" ? signal.payload.canonical_source_url : undefined;
 
-  const metadata: PriceThresholdHypothesisMetadata | undefined = machineResolvable
-    ? {
-        kind: "price_threshold",
-        asset_symbol: assetSymbol!,
-        threshold,
-        operator,
-        canonical_source_url: canonicalSourceUrl,
-        category,
-      }
-    : undefined;
+  if (!assetSymbol || !Number.isFinite(threshold) || !canonicalSourceUrl) {
+    return null;
+  }
 
-  const derived: DerivedHypothesis = {
-    category,
-    subject: assetSymbol ?? signal.title,
-    predicate: "price_threshold",
-    target_time: targetTime ?? new Date().toISOString(),
-    machine_resolvable: Boolean(machineResolvable),
-    suggested_resolution_kind: machineResolvable ? ("price_threshold" satisfies ResolutionKind) : undefined,
-    suggested_resolution_source_url: machineResolvable ? canonicalSourceUrl : undefined,
-    suggested_resolution_metadata: metadata,
-    suppression_reason: machineResolvable ? null : "incomplete_price_threshold_signal",
+  return {
+    kind: "price_threshold",
+    source: {
+      adapter: "http_json",
+      canonical_url: canonicalSourceUrl,
+      allowed_domains: normalizeAllowedDomainsFromUrl(canonicalSourceUrl),
+    },
+    observation_schema: {
+      type: "object",
+      fields: {
+        price: { type: "number", path: "price" },
+        observed_at: { type: "string", path: "observed_at", required: false },
+      },
+    },
+    decision_rule: {
+      kind: "price_threshold",
+      observation_field: "price",
+      operator,
+      threshold,
+    },
+    quorum_rule: {
+      min_observations: 2,
+      min_distinct_collectors: 2,
+      agreement: "all",
+    },
+    quarantine_rule: {
+      on_source_fetch_failure: true,
+      on_schema_validation_failure: true,
+      on_observation_conflict: true,
+      max_observation_age_seconds: 3600,
+    },
   };
-
-  return derived;
 }
 
-function deriveRateDecisionHypothesis(signal: WorldSignal) {
-  const institution =
-    typeof signal.payload.institution === "string"
-      ? signal.payload.institution
-      : findEntityValue(signal, "institution");
+function buildRateDecisionSpec(signal: WorldSignal): ResolutionSpec | null {
   const direction =
     signal.payload.direction === "hold" || signal.payload.direction === "hike"
       ? signal.payload.direction
       : "cut";
-  const targetTime =
-    typeof signal.payload.target_time === "string" ? signal.payload.target_time : signal.effective_at;
   const canonicalSourceUrl =
-    typeof signal.payload.canonical_source_url === "string"
-      ? signal.payload.canonical_source_url
-      : signal.source_url;
-  const category =
-    typeof signal.payload.category === "string" && signal.payload.category.length > 0
-      ? signal.payload.category
-      : "macro";
-  const machineResolvable =
-    typeof institution === "string" &&
-    institution.length > 0 &&
-    typeof targetTime === "string" &&
-    typeof canonicalSourceUrl === "string";
+    typeof signal.payload.canonical_source_url === "string" ? signal.payload.canonical_source_url : undefined;
 
-  const metadata: RateDecisionHypothesisMetadata | undefined = machineResolvable
-    ? {
-        kind: "rate_decision",
-        institution: institution!,
-        direction,
-        canonical_source_url: canonicalSourceUrl,
-        category,
-      }
-    : undefined;
-
-  const derived: DerivedHypothesis = {
-    category,
-    subject: institution ?? signal.title,
-    predicate: `rate_decision_${direction}`,
-    target_time: targetTime ?? new Date().toISOString(),
-    machine_resolvable: Boolean(machineResolvable),
-    suggested_resolution_kind: machineResolvable ? ("rate_decision" satisfies ResolutionKind) : undefined,
-    suggested_resolution_source_url: machineResolvable ? canonicalSourceUrl : undefined,
-    suggested_resolution_metadata: metadata,
-    suppression_reason: machineResolvable ? null : "incomplete_rate_decision_signal",
-  };
-
-  return derived;
-}
-
-function deriveHypothesis(signal: WorldSignal): WorldHypothesis {
-  const explicitKind =
-    signal.payload.kind === "price_threshold" || signal.payload.kind === "rate_decision"
-      ? signal.payload.kind
-      : null;
-
-  const derived: DerivedHypothesis =
-    explicitKind === "price_threshold" || signal.source_type === "price_feed"
-      ? derivePriceThresholdHypothesis(signal)
-      : explicitKind === "rate_decision" || signal.source_type === "economic_calendar"
-        ? deriveRateDecisionHypothesis(signal)
-        : {
-            category:
-              typeof signal.payload.category === "string" && signal.payload.category.length > 0
-                ? signal.payload.category
-                : "general",
-            subject: signal.title,
-            predicate: "unsupported_signal",
-            target_time: signal.effective_at ?? signal.created_at,
-            machine_resolvable: false,
-            suggested_resolution_kind: undefined,
-            suggested_resolution_source_url: undefined,
-            suggested_resolution_metadata: undefined,
-            suppression_reason: "unsupported_signal_type",
-          };
-
-  const hypothesis: WorldHypothesis = {
-    id: randomUUID(),
-    source_signal_ids: [signal.id],
-    category: derived.category,
-    subject: derived.subject,
-    predicate: derived.predicate,
-    target_time: derived.target_time,
-    confidence_score: baseConfidenceForTrustTier(signal),
-    reasoning_summary: signal.summary,
-    machine_resolvable: derived.machine_resolvable,
-    suggested_resolution_kind: derived.suggested_resolution_kind,
-    suggested_resolution_source_url: derived.suggested_resolution_source_url,
-    suggested_resolution_metadata: derived.suggested_resolution_metadata,
-    status: derived.machine_resolvable ? "new" : "suppressed",
-    suppression_reason: derived.suppression_reason,
-    linked_proposal_id: null,
-    dedupe_key: buildDedupeKey({
-      signal: signal.dedupe_key,
-      predicate: derived.predicate,
-      target_time: derived.target_time,
-    }),
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  };
-
-  const validation = validateWorldHypothesis(hypothesis);
-  if (!validation.ok) {
-    throw new Error(`invalid_world_hypothesis:${validation.errors.join(",")}`);
+  if (!canonicalSourceUrl) {
+    return null;
   }
 
-  return validation.hypothesis;
+  return {
+    kind: "rate_decision",
+    source: {
+      adapter: "http_json",
+      canonical_url: canonicalSourceUrl,
+      allowed_domains: normalizeAllowedDomainsFromUrl(canonicalSourceUrl),
+    },
+    observation_schema: {
+      type: "object",
+      fields: {
+        previous_upper_bound_bps: { type: "number", path: "previous_upper_bound_bps" },
+        current_upper_bound_bps: { type: "number", path: "current_upper_bound_bps" },
+        observed_at: { type: "string", path: "observed_at", required: false },
+      },
+    },
+    decision_rule: {
+      kind: "rate_decision",
+      previous_field: "previous_upper_bound_bps",
+      current_field: "current_upper_bound_bps",
+      direction,
+    },
+    quorum_rule: {
+      min_observations: 2,
+      min_distinct_collectors: 2,
+      agreement: "all",
+    },
+    quarantine_rule: {
+      on_source_fetch_failure: true,
+      on_schema_validation_failure: true,
+      on_observation_conflict: true,
+      max_observation_age_seconds: 3600,
+    },
+  };
 }
 
-async function fetchSignals(limit: number) {
-  const result = await pool.query<WorldSignalRow>(
-    `
-      SELECT *
-      FROM world_signals
-      ORDER BY created_at DESC, id DESC
-      LIMIT $1
-    `,
-    [limit],
-  );
+function buildDirectHypotheses(runId: string, signals: WorldSignal[], regimeLabels: string[]) {
+  const signalIds = signals.map((signal) => signal.id);
+  const combinedSummary = signals.map((signal) => signal.summary).join(" | ");
+  const hypotheses: BeliefHypothesisProposal[] = [];
 
-  return result.rows.map(mapSignalRow);
+  for (const signal of signals) {
+    if (signal.payload.kind === "price_threshold") {
+      const spec = buildPriceThresholdSpec(signal);
+      if (!spec) {
+        continue;
+      }
+
+      const assetSymbol =
+        typeof signal.payload.asset_symbol === "string" ? signal.payload.asset_symbol : signal.title;
+      const hasMacroSupport = regimeLabels.includes("macro:easing_bias");
+      const baseConfidence = agentProfile === "market" ? 0.79 : 0.68;
+      const confidence = clamp(baseConfidence + (hasMacroSupport ? 0.05 : 0));
+      const hypothesis: BeliefHypothesisProposal = {
+        id: randomUUID(),
+        run_id: runId,
+        agent_id: agentId,
+        parent_ids: signalIds,
+        hypothesis_kind: "price_threshold",
+        category:
+          typeof signal.payload.category === "string" && signal.payload.category.length > 0
+            ? signal.payload.category
+            : "crypto",
+        subject: assetSymbol,
+        predicate: "price_threshold",
+        target_time:
+          typeof signal.payload.target_time === "string"
+            ? signal.payload.target_time
+            : signal.effective_at ?? new Date().toISOString(),
+        confidence_score: confidence,
+        reasoning_summary: `${agentId} combined market and macro context into a bullish ${assetSymbol} threshold view. ${combinedSummary}`,
+        source_signal_ids: signalIds,
+        machine_resolvable: true,
+        suggested_resolution_spec: spec,
+        dedupe_key: buildDedupeKey({
+          kind: "price_threshold",
+          subject: assetSymbol,
+          target_time:
+            typeof signal.payload.target_time === "string"
+              ? signal.payload.target_time
+              : signal.effective_at ?? new Date().toISOString(),
+          resolution_spec: spec,
+        }),
+        created_at: new Date().toISOString(),
+      };
+      const validation = validateBeliefHypothesisProposal(hypothesis);
+      if (validation.ok) {
+        hypotheses.push(validation.proposal);
+      }
+      continue;
+    }
+
+    if (signal.payload.kind === "rate_decision") {
+      const spec = buildRateDecisionSpec(signal);
+      if (!spec) {
+        continue;
+      }
+
+      const institution =
+        typeof signal.payload.institution === "string" ? signal.payload.institution : signal.title;
+      const hasRiskOnSupport = regimeLabels.includes("market:risk_on");
+      const baseConfidence = agentProfile === "macro" ? 0.81 : 0.72;
+      const confidence = clamp(baseConfidence + (hasRiskOnSupport ? 0.03 : 0));
+      const hypothesis: BeliefHypothesisProposal = {
+        id: randomUUID(),
+        run_id: runId,
+        agent_id: agentId,
+        parent_ids: signalIds,
+        hypothesis_kind: "rate_decision",
+        category:
+          typeof signal.payload.category === "string" && signal.payload.category.length > 0
+            ? signal.payload.category
+            : "macro",
+        subject: institution,
+        predicate: `rate_decision_${signal.payload.direction === "hold" || signal.payload.direction === "hike" ? signal.payload.direction : "cut"}`,
+        target_time:
+          typeof signal.payload.target_time === "string"
+            ? signal.payload.target_time
+            : signal.effective_at ?? new Date().toISOString(),
+        confidence_score: confidence,
+        reasoning_summary: `${agentId} combined calendar and market context into a ${institution} policy view. ${combinedSummary}`,
+        source_signal_ids: signalIds,
+        machine_resolvable: true,
+        suggested_resolution_spec: spec,
+        dedupe_key: buildDedupeKey({
+          kind: "rate_decision",
+          subject: institution,
+          target_time:
+            typeof signal.payload.target_time === "string"
+              ? signal.payload.target_time
+              : signal.effective_at ?? new Date().toISOString(),
+          resolution_spec: spec,
+        }),
+        created_at: new Date().toISOString(),
+      };
+      const validation = validateBeliefHypothesisProposal(hypothesis);
+      if (validation.ok) {
+        hypotheses.push(validation.proposal);
+      }
+    }
+  }
+
+  return hypotheses;
 }
 
-async function upsertHypothesis(hypothesis: WorldHypothesis) {
+async function upsertWorldStateProposal(proposal: WorldStateProposal) {
   await pool.query(
     `
-      INSERT INTO world_hypotheses (
+      INSERT INTO world_state_proposals (
         id,
+        run_id,
+        agent_id,
         source_signal_ids,
+        as_of,
+        entities,
+        active_events,
+        factors,
+        regime_labels,
+        reasoning_summary,
+        created_at
+      )
+      VALUES (
+        $1, $2, $3, $4::jsonb, $5::timestamptz, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10, $11::timestamptz
+      )
+      ON CONFLICT (run_id, agent_id) DO UPDATE SET
+        source_signal_ids = EXCLUDED.source_signal_ids,
+        as_of = EXCLUDED.as_of,
+        entities = EXCLUDED.entities,
+        active_events = EXCLUDED.active_events,
+        factors = EXCLUDED.factors,
+        regime_labels = EXCLUDED.regime_labels,
+        reasoning_summary = EXCLUDED.reasoning_summary
+    `,
+    [
+      proposal.id,
+      proposal.run_id,
+      proposal.agent_id,
+      JSON.stringify(proposal.source_signal_ids),
+      proposal.as_of,
+      JSON.stringify(proposal.entities),
+      JSON.stringify(proposal.active_events),
+      JSON.stringify(proposal.factors),
+      JSON.stringify(proposal.regime_labels),
+      proposal.reasoning_summary,
+      proposal.created_at,
+    ],
+  );
+}
+
+async function upsertBeliefHypothesisProposal(proposal: BeliefHypothesisProposal) {
+  await pool.query(
+    `
+      INSERT INTO belief_hypothesis_proposals (
+        id,
+        run_id,
+        agent_id,
+        parent_ids,
+        hypothesis_kind,
         category,
         subject,
         predicate,
         target_time,
         confidence_score,
         reasoning_summary,
+        source_signal_ids,
         machine_resolvable,
-        suggested_resolution_kind,
-        suggested_resolution_source_url,
-        suggested_resolution_metadata,
+        suggested_resolution_spec,
         dedupe_key,
-        status,
-        suppression_reason,
-        linked_proposal_id,
-        created_at,
-        updated_at
+        created_at
       )
       VALUES (
-        $1, $2::jsonb, $3, $4, $5, $6::timestamptz, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15, $16, $17::timestamptz, $18::timestamptz
+        $1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9::timestamptz, $10, $11, $12::jsonb, $13, $14::jsonb, $15, $16::timestamptz
       )
-      ON CONFLICT (dedupe_key) DO UPDATE SET
-        source_signal_ids = EXCLUDED.source_signal_ids,
-        category = EXCLUDED.category,
-        subject = EXCLUDED.subject,
-        predicate = EXCLUDED.predicate,
-        target_time = EXCLUDED.target_time,
+      ON CONFLICT (run_id, agent_id, dedupe_key) DO UPDATE SET
         confidence_score = EXCLUDED.confidence_score,
         reasoning_summary = EXCLUDED.reasoning_summary,
+        source_signal_ids = EXCLUDED.source_signal_ids,
         machine_resolvable = EXCLUDED.machine_resolvable,
-        suggested_resolution_kind = EXCLUDED.suggested_resolution_kind,
-        suggested_resolution_source_url = EXCLUDED.suggested_resolution_source_url,
-        suggested_resolution_metadata = EXCLUDED.suggested_resolution_metadata,
-        status = CASE
-          WHEN world_hypotheses.status = 'proposed' THEN world_hypotheses.status
-          ELSE EXCLUDED.status
-        END,
-        suppression_reason = EXCLUDED.suppression_reason,
-        updated_at = EXCLUDED.updated_at
+        suggested_resolution_spec = EXCLUDED.suggested_resolution_spec
     `,
     [
-      hypothesis.id,
-      JSON.stringify(hypothesis.source_signal_ids),
-      hypothesis.category,
-      hypothesis.subject,
-      hypothesis.predicate,
-      hypothesis.target_time,
-      hypothesis.confidence_score,
-      hypothesis.reasoning_summary,
-      hypothesis.machine_resolvable,
-      hypothesis.suggested_resolution_kind ?? null,
-      hypothesis.suggested_resolution_source_url ?? null,
-      JSON.stringify(hypothesis.suggested_resolution_metadata ?? null),
-      hypothesis.dedupe_key,
-      hypothesis.status,
-      hypothesis.suppression_reason ?? null,
-      hypothesis.linked_proposal_id ?? null,
-      hypothesis.created_at,
-      hypothesis.updated_at,
+      proposal.id,
+      proposal.run_id,
+      proposal.agent_id,
+      JSON.stringify(proposal.parent_ids),
+      proposal.hypothesis_kind,
+      proposal.category,
+      proposal.subject,
+      proposal.predicate,
+      proposal.target_time,
+      proposal.confidence_score,
+      proposal.reasoning_summary,
+      JSON.stringify(proposal.source_signal_ids),
+      proposal.machine_resolvable,
+      JSON.stringify(proposal.suggested_resolution_spec ?? null),
+      proposal.dedupe_key,
+      proposal.created_at,
     ],
   );
+}
+
+async function processRun(runId: string, triggerSignalIds: string[]) {
+  const signals = await fetchSignals(triggerSignalIds);
+  if (signals.length === 0) {
+    return;
+  }
+
+  const entities = buildEntities(signals);
+  const activeEvents = buildActiveEvents(signals);
+  const factors = buildFactors(signals);
+  const regimeLabels = buildRegimeLabels(factors);
+  const worldStateProposal: WorldStateProposal = {
+    id: randomUUID(),
+    run_id: runId,
+    agent_id: agentId,
+    source_signal_ids: triggerSignalIds,
+    as_of: new Date().toISOString(),
+    entities,
+    active_events: activeEvents,
+    factors,
+    regime_labels: regimeLabels,
+    reasoning_summary: `${agentId} proposed a world-state interpretation across ${signals.length} signals using the ${agentProfile} profile.`,
+    created_at: new Date().toISOString(),
+  };
+  const stateValidation = validateWorldStateProposal(worldStateProposal);
+  if (!stateValidation.ok) {
+    throw new Error(`invalid_world_state_proposal:${stateValidation.errors.join(",")}`);
+  }
+
+  await upsertWorldStateProposal(stateValidation.proposal);
+
+  const hypotheses = buildDirectHypotheses(runId, signals, regimeLabels);
+  for (const hypothesis of hypotheses) {
+    await upsertBeliefHypothesisProposal(hypothesis);
+  }
 }
 
 async function tick() {
@@ -389,10 +633,9 @@ async function tick() {
 
   tickInFlight = true;
   try {
-    const signals = await fetchSignals(batchSize);
-    for (const signal of signals) {
-      const hypothesis = deriveHypothesis(signal);
-      await upsertHypothesis(hypothesis);
+    const runs = await fetchRunsNeedingAgentOutput(batchSize);
+    for (const run of runs) {
+      await processRun(run.id, run.trigger_signal_ids);
     }
     lastTickAt = new Date().toISOString();
     lastTickError = null;
@@ -408,34 +651,37 @@ async function tick() {
 app.get("/health", async () => ({
   service: "world-model",
   status: "ok",
+  agent_id: agentId,
+  agent_profile: agentProfile,
   last_tick_at: lastTickAt,
   last_tick_error: lastTickError,
 }));
 
-app.get("/v1/internal/world-hypotheses", async (request) => {
-  const query = request.query as { status?: WorldHypothesis["status"]; limit?: string };
-  const limit = Math.max(1, Math.min(200, Number(query.limit ?? "50") || 50));
-  const values: unknown[] = [];
-  let whereClause = "";
-  if (query.status) {
-    values.push(query.status);
-    whereClause = `WHERE status = $${values.length}`;
-  }
-  values.push(limit);
-
-  const result = await pool.query<WorldHypothesisRow>(
+app.get("/v1/internal/world-state-proposals", async () => {
+  const result = await pool.query<WorldStateProposalRow>(
     `
       SELECT *
-      FROM world_hypotheses
-      ${whereClause}
+      FROM world_state_proposals
       ORDER BY created_at DESC, id DESC
-      LIMIT $${values.length}
     `,
-    values,
   );
 
   return {
-    items: result.rows.map(mapHypothesisRow),
+    items: result.rows.map(mapWorldStateProposalRow),
+  };
+});
+
+app.get("/v1/internal/world-model-hypotheses", async () => {
+  const result = await pool.query<BeliefHypothesisProposalRow>(
+    `
+      SELECT *
+      FROM belief_hypothesis_proposals
+      ORDER BY created_at DESC, id DESC
+    `,
+  );
+
+  return {
+    items: result.rows.map(mapHypothesisProposalRow),
   };
 });
 

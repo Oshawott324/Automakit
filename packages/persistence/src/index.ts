@@ -99,32 +99,100 @@ export async function ensureCoreSchema(pool: Pool) {
       updated_at TIMESTAMPTZ NOT NULL
     );
 
-    CREATE TABLE IF NOT EXISTS world_hypotheses (
+    CREATE TABLE IF NOT EXISTS simulation_runs (
       id TEXT PRIMARY KEY,
+      run_type TEXT NOT NULL,
+      trigger_signal_ids JSONB NOT NULL,
+      trigger_dedupe_key TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL,
+      started_at TIMESTAMPTZ NOT NULL,
+      completed_at TIMESTAMPTZ,
+      failure_reason TEXT,
+      last_updated_at TIMESTAMPTZ NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_simulation_runs_status_started
+      ON simulation_runs (status, started_at DESC);
+
+    CREATE TABLE IF NOT EXISTS world_state_proposals (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES simulation_runs(id) ON DELETE CASCADE,
+      agent_id TEXT NOT NULL,
       source_signal_ids JSONB NOT NULL,
+      as_of TIMESTAMPTZ NOT NULL,
+      entities JSONB NOT NULL,
+      active_events JSONB NOT NULL,
+      factors JSONB NOT NULL,
+      regime_labels JSONB NOT NULL,
+      reasoning_summary TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL,
+      UNIQUE (run_id, agent_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_world_state_proposals_run
+      ON world_state_proposals (run_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS scenario_path_proposals (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES simulation_runs(id) ON DELETE CASCADE,
+      agent_id TEXT NOT NULL,
+      label TEXT NOT NULL,
+      probability DOUBLE PRECISION NOT NULL,
+      narrative TEXT NOT NULL,
+      factor_deltas JSONB NOT NULL,
+      path_events JSONB NOT NULL,
+      path_hypotheses JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL,
+      UNIQUE (run_id, agent_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_scenario_path_proposals_run
+      ON scenario_path_proposals (run_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS belief_hypothesis_proposals (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES simulation_runs(id) ON DELETE CASCADE,
+      agent_id TEXT NOT NULL,
+      parent_ids JSONB NOT NULL,
+      hypothesis_kind TEXT NOT NULL,
       category TEXT NOT NULL,
       subject TEXT NOT NULL,
       predicate TEXT NOT NULL,
       target_time TIMESTAMPTZ NOT NULL,
       confidence_score DOUBLE PRECISION NOT NULL,
       reasoning_summary TEXT NOT NULL,
+      source_signal_ids JSONB NOT NULL,
       machine_resolvable BOOLEAN NOT NULL,
-      suggested_resolution_kind TEXT,
-      suggested_resolution_source_url TEXT,
-      suggested_resolution_metadata JSONB,
-      dedupe_key TEXT NOT NULL UNIQUE,
+      suggested_resolution_spec JSONB,
+      dedupe_key TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL,
+      UNIQUE (run_id, agent_id, dedupe_key)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_belief_hypothesis_proposals_run
+      ON belief_hypothesis_proposals (run_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS synthesized_beliefs (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES simulation_runs(id) ON DELETE CASCADE,
+      agent_id TEXT NOT NULL,
+      belief_dedupe_key TEXT NOT NULL,
+      parent_hypothesis_ids JSONB NOT NULL,
+      agreement_score DOUBLE PRECISION NOT NULL,
+      disagreement_score DOUBLE PRECISION NOT NULL,
+      confidence_score DOUBLE PRECISION NOT NULL,
+      conflict_notes TEXT,
+      hypothesis JSONB NOT NULL,
       status TEXT NOT NULL,
       suppression_reason TEXT,
       linked_proposal_id TEXT,
       created_at TIMESTAMPTZ NOT NULL,
-      updated_at TIMESTAMPTZ NOT NULL
+      updated_at TIMESTAMPTZ NOT NULL,
+      UNIQUE (run_id, agent_id, belief_dedupe_key)
     );
 
-    CREATE INDEX IF NOT EXISTS idx_world_hypotheses_status_created
-      ON world_hypotheses (status, created_at DESC);
-
-    CREATE INDEX IF NOT EXISTS idx_world_hypotheses_category_target_time
-      ON world_hypotheses (category, target_time DESC);
+    CREATE INDEX IF NOT EXISTS idx_synthesized_beliefs_status_created
+      ON synthesized_beliefs (status, created_at DESC);
 
     CREATE TABLE IF NOT EXISTS markets (
       id TEXT PRIMARY KEY,
@@ -336,6 +404,10 @@ export async function ensureCoreSchema(pool: Pool) {
     ALTER TABLE proposals ADD COLUMN IF NOT EXISTS resolution_spec JSONB NOT NULL DEFAULT '{}'::jsonb;
     ALTER TABLE markets ADD COLUMN IF NOT EXISTS resolution_spec JSONB NOT NULL DEFAULT '{}'::jsonb;
     ALTER TABLE observations ADD COLUMN IF NOT EXISTS parser_version TEXT NOT NULL DEFAULT 'resolution-runtime@1';
+    ALTER TABLE simulation_runs ADD COLUMN IF NOT EXISTS trigger_dedupe_key TEXT;
+    ALTER TABLE simulation_runs ADD COLUMN IF NOT EXISTS last_updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+    ALTER TABLE scenario_path_proposals ADD COLUMN IF NOT EXISTS path_hypotheses JSONB NOT NULL DEFAULT '[]'::jsonb;
+    ALTER TABLE synthesized_beliefs ADD COLUMN IF NOT EXISTS belief_dedupe_key TEXT;
   `);
 }
 

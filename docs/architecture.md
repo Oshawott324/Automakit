@@ -8,7 +8,7 @@ The highest-priority system concern is not exchange throughput. It is world sync
 
 The core operating rule is role separation:
 
-- platform-owned agents generate beliefs, proposals, liquidity bootstrap, and settlement observations,
+- platform-owned agents simulate beliefs, synthesize proposals, bootstrap liquidity, and collect settlement observations,
 - third-party agents primarily trade,
 - humans observe only.
 
@@ -22,6 +22,8 @@ Users and Operators
 Platform-Owned Agents
   -> World-Input Agents
   -> World-Model Agents
+  -> Scenario Simulation Agents
+  -> Synthesis Agents
   -> Proposal Agents
   -> Liquidity Agents
   -> Resolution Collector Agents
@@ -39,6 +41,7 @@ Core Services
   -> Market Service
   -> Matching Engine
   -> Portfolio Service
+  -> Simulation Orchestrator
   -> Proposal Agent
   -> Proposal Pipeline
   -> Resolution Collector
@@ -66,6 +69,7 @@ Data and Infra
 - Require explicit source-of-truth metadata for every market.
 - Treat truth synchronization as a first-class subsystem alongside trading.
 - Prefer typed observations and deterministic resolution rules over free-text interpretation.
+- Keep belief generation agent-driven and keep the platform deterministic only at validation and settlement boundaries.
 - Quarantine ambiguity automatically instead of relying on human intervention.
 - Do not require every connected agent to simulate the world.
 - Keep simulated-world outputs separate from canonical truth inputs used for settlement.
@@ -80,14 +84,22 @@ Platform-owned roles:
 
 - `world-model agent`
   - consumes normalized world signals and scenario inputs,
-  - produces structured beliefs or candidate futures,
+  - produces proposed world interpretations and direct hypotheses,
   - is not itself a settlement authority.
 - `world-input agent`
   - polls canonical upstream sources automatically,
   - normalizes them into durable `world_signals`,
   - keeps the belief layer alive without human prompting.
+- `scenario simulation agent`
+  - consumes current world context,
+  - generates several plausible future paths,
+  - emits scenario-derived hypotheses without becoming a settlement authority.
+- `synthesis agent`
+  - merges competing world-model and scenario outputs,
+  - emits synthesized beliefs under typed contracts,
+  - may preserve ambiguity instead of forcing a single conclusion.
 - `proposal agent`
-  - converts beliefs and signals into typed market drafts,
+  - converts synthesized beliefs into typed market drafts,
   - submits only markets with valid `resolution_spec`.
 - `liquidity agent`
   - bootstraps order books and reduces cold-start risk,
@@ -231,26 +243,67 @@ Current implementation direction:
 - It writes `world_signals` and `world_input_cursors` into Postgres.
 - The initial adapter surface is intentionally small and centered on machine-readable `http_json` sources.
 
-### 4.11 World-Model Layer
+### 4.11 Simulation Orchestrator
 
 Responsibilities:
 
-- Turn `world_signals`, documents, and scenario inputs into structured beliefs about future states.
-- Produce typed outputs that proposal agents can convert into machine-resolvable market drafts.
+- create and track upstream simulation runs,
+- dispatch work to world-model, scenario, and synthesis agents,
+- manage timeouts, retries, and output collection windows,
+- enforce deterministic workflow transitions over agent-generated outputs,
+- hand synthesized beliefs to proposal agents.
+
+This service should coordinate agent work, not implement belief logic itself.
+
+### 4.12 World-Model Agents
+
+Responsibilities:
+
+- Turn `world_signals`, documents, and scenario inputs into proposed world interpretations.
+- Emit direct hypotheses and world-state proposals under typed contracts.
 - Remain explicitly upstream of market listing and completely separate from settlement truth.
 
 Implementation direction:
 
 - The current service is `services/world-model`.
-- In the near term, this begins as deterministic enrichment over upstream feeds rather than a freeform simulator.
-- If simulation becomes a first-class product surface, it should live in a dedicated `services/scenario-simulator` with shared types under `packages/world-sim`.
+- The current hardcoded mapping implementation should be treated as deprecated transitional code.
+- The target design is an agent runtime surface rather than a platform-owned belief engine.
+- Outputs should be validated structurally and stored even when agents disagree.
 - This layer must never be treated as the final authority for market settlement.
 
-### 4.12 Proposal Agent
+### 4.13 Scenario Agents
 
 Responsibilities:
 
-- Read fresh `world_hypotheses`.
+- Consume current world context and direct hypotheses.
+- Generate several future paths such as `base`, `bull`, `bear`, and optional `stress`.
+- Emit scenario-path proposals and path-scoped hypotheses under typed contracts.
+- Persist run traces for replay, audit, and observer views.
+
+Implementation direction:
+
+- This should be an agent runtime or orchestrated worker class rather than platform-coded market logic.
+- Its outputs may influence listing and trading, but must never be valid settlement inputs.
+
+### 4.14 Synthesis Agents
+
+Responsibilities:
+
+- Merge competing world-model and scenario outputs.
+- Produce synthesized beliefs with agreement and disagreement metadata.
+- Preserve uncertainty explicitly when agent outputs conflict.
+- Feed proposal agents with a smaller, typed set of candidate beliefs.
+
+Implementation direction:
+
+- This layer replaces the idea of a single platform-coded belief engine.
+- The platform should validate the shape of synthesized beliefs, not hardcode the reasoning path.
+
+### 4.15 Proposal Agent
+
+Responsibilities:
+
+- Read fresh synthesized beliefs.
 - Convert only eligible hypotheses into typed proposal drafts.
 - Generate titles, close times, resolution criteria, and `resolution_spec`.
 - Submit proposals to the proposal pipeline and mark hypotheses `proposed` or `suppressed`.
@@ -258,9 +311,9 @@ Responsibilities:
 Current implementation direction:
 
 - The current service is `services/proposal-agent`.
-- It is deterministic and conservative: if it cannot generate a machine-resolvable market draft, it suppresses the hypothesis instead of guessing.
+- It should remain conservative: if it cannot generate a machine-resolvable market draft, it must suppress the hypothesis instead of guessing.
 
-### 4.13 Resolution Service
+### 4.16 Resolution Service
 
 Responsibilities:
 
@@ -276,7 +329,7 @@ Current implementation direction:
 - The resolution path should finalize only from verified observations plus typed rules, or quarantine automatically on divergence.
 - This service should remain the resolution state machine, not the source-fetch worker.
 
-### 4.14 Resolution Collector
+### 4.17 Resolution Collector
 
 Responsibilities:
 
@@ -288,7 +341,7 @@ Responsibilities:
 
 This service should be horizontally scalable by collector identity and should treat the database as the durable work queue.
 
-### 4.15 Observation Ledger
+### 4.18 Observation Ledger
 
 Responsibilities:
 

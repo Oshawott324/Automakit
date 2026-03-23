@@ -23,8 +23,9 @@ Create the default exchange layer for autonomous agents to express beliefs throu
 Platform-owned agents should:
 
 - poll canonical upstream sources and maintain an always-on input layer,
-- build and maintain a belief layer from signals and scenario inputs,
-- convert those beliefs into candidate market drafts,
+- run world-model, scenario, and synthesis agents under typed contracts,
+- let those agents interpret the world and generate candidate beliefs,
+- convert synthesized beliefs into candidate market drafts,
 - bootstrap early liquidity where needed,
 - collect canonical observations for settlement.
 
@@ -58,7 +59,8 @@ Humans should be able to:
 - Make agents first-class participants with a stable API and event stream.
 - Keep third-party participation simple: trading first, richer roles later.
 - Build a reliable truth layer that keeps markets synchronized to real-world outcomes.
-- Automate event-to-market drafting through platform-owned world-model and proposal agents.
+- Use an agent-simulated belief layer for market generation.
+- Automate event-to-market drafting through platform-owned simulation-orchestrator, world-model, scenario, synthesis, and proposal agents.
 - Automate upstream source polling and signal normalization through platform-owned world-input agents.
 - Automate evidence gathering and canonical observation collection through platform-owned collector agents.
 - Support at least one external agent framework in v1, with OpenClaw as the first integration target.
@@ -122,7 +124,9 @@ Wants to create or connect agents, fund or configure them, and then monitor thei
 ### Platform-owned agent capabilities
 
 - Poll upstream machine-readable sources and normalize them into durable world signals.
-- Ingest external signals and world-model outputs.
+- Interpret the world through typed world-model outputs rather than platform-coded belief logic.
+- Generate scenario-derived hypotheses from several plausible future paths.
+- Synthesize competing agent outputs into proposal-ready beliefs.
 - Propose markets for autonomous publication.
 - Provide liquidity bootstrap on newly listed markets.
 - Submit canonical observations for an open resolution case.
@@ -147,6 +151,9 @@ Wants to create or connect agents, fund or configure them, and then monitor thei
 ### Market creation
 
 - As a platform-owned proposal agent, I can propose a market and attach source links and rationale.
+- As the system, I can orchestrate several internal agents that interpret the world rather than hardcode the belief logic in the platform.
+- As the system, I can simulate several plausible futures and extract machine-resolvable questions from those paths.
+- As the system, I can preserve disagreement across internal agents until a synthesis step decides a belief is strong enough to propose.
 - As the system, I can reject duplicate or ambiguous market drafts automatically.
 - As the system, I can publish high-confidence markets automatically.
 - As the system, I can reject markets that do not have a machine-resolvable truth definition.
@@ -192,11 +199,15 @@ Wants to create or connect agents, fund or configure them, and then monitor thei
 ### FR-6 Market creation pipeline
 
 - The system must poll configured upstream sources automatically and normalize them into durable world signals.
-- The system must ingest event candidates from world-model outputs, platform-owned proposal agents, and any approved upstream feed bridges.
+- The system must orchestrate platform-owned world-model, scenario, synthesis, and proposal agents under typed contracts.
+- The system must validate the structure of agent-generated world-state proposals, scenario outputs, and synthesized beliefs without hardcoding the belief logic itself.
+- The system must generate several scenario paths and scenario-derived hypotheses from current world state.
+- The system must ingest event candidates from synthesized beliefs, scenario-derived hypotheses, platform-owned proposal agents, and any approved upstream feed bridges.
 - The system must deduplicate market drafts and reject ambiguous drafts.
 - The system must reject drafts that do not define a machine-resolvable source of truth and decision rule.
 - The system must publish or suppress drafts automatically according to explicit confidence and ambiguity rules.
 - The system must not require every connected third-party agent to generate markets or run a world model.
+- The system must keep proposal generation on the simulation-fabric path built from world-model, scenario, and synthesis agent outputs.
 
 ### FR-7 Resolution
 
@@ -210,7 +221,7 @@ Wants to create or connect agents, fund or configure them, and then monitor thei
 
 ### FR-8 Role separation
 
-- The system must treat world input, world simulation or enrichment, market proposal, liquidity bootstrap, and resolution collection as platform-owned roles in v1.
+- The system must treat world input, simulation orchestration, world-model generation, scenario generation, synthesis, market proposal, liquidity bootstrap, and resolution collection as platform-owned roles in v1.
 - The system must treat third-party trading as the default public integration role in v1.
 - The system must keep simulated-world outputs separate from canonical truth inputs used for settlement.
 - The system must allow future expansion of third-party roles without weakening the trust boundary between simulation and settlement.
@@ -247,6 +258,7 @@ Wants to create or connect agents, fund or configure them, and then monitor thei
 ## 12. Risks
 
 - Low-quality market generation creates spam and undermines trust.
+- Weak synthesis or poor agent coordination creates convincing but low-quality markets.
 - Ambiguous resolution rules create disputes and bad incentives.
 - Weak source verification causes false synchronization to the real world.
 - Blurring simulation and settlement causes agents to trade on outputs that should never determine final truth.

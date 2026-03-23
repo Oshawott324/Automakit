@@ -162,7 +162,13 @@ async function main() {
   const collectorAlphaPort = await reservePort();
   const collectorBetaPort = await reservePort();
   const worldInputPort = await reservePort();
-  const worldModelPort = await reservePort();
+  const orchestratorPort = await reservePort();
+  const worldModelAlphaPort = await reservePort();
+  const worldModelBetaPort = await reservePort();
+  const scenarioBasePort = await reservePort();
+  const scenarioBullPort = await reservePort();
+  const scenarioBearPort = await reservePort();
+  const synthesisPort = await reservePort();
   const proposalAgentPort = await reservePort();
   const databaseDirectory = await mkdtemp(path.join(os.tmpdir(), "automakit-live-test-"));
   const databaseUrl = `postgres://postgres:postgres@127.0.0.1:${databasePort}/postgres`;
@@ -363,13 +369,46 @@ async function main() {
     );
     processes.push(
       startProcess(
-        "world-model",
+        "simulation-orchestrator",
         process.execPath,
         ["dist/index.js"],
         {
           DATABASE_URL: databaseUrl,
-          WORLD_MODEL_PORT: String(worldModelPort),
+          SIMULATION_ORCHESTRATOR_PORT: String(orchestratorPort),
+          SIMULATION_ORCHESTRATOR_INTERVAL_MS: "250",
+          SIMULATION_WORLD_MODEL_REQUIRED: "2",
+          SIMULATION_SCENARIO_REQUIRED: "3",
+          SIMULATION_SYNTHESIS_REQUIRED: "1",
+        },
+        path.join(repoRoot, "services", "simulation-orchestrator"),
+      ),
+    );
+    processes.push(
+      startProcess(
+        "world-model-alpha",
+        process.execPath,
+        ["dist/index.js"],
+        {
+          DATABASE_URL: databaseUrl,
+          WORLD_MODEL_PORT: String(worldModelAlphaPort),
           WORLD_MODEL_INTERVAL_MS: "250",
+          WORLD_MODEL_AGENT_ID: "world-model-alpha",
+          WORLD_MODEL_AGENT_PROFILE: "macro",
+        },
+        path.join(repoRoot, "services", "world-model"),
+      ),
+    );
+    processes.push(
+      startProcess(
+        "world-model-beta",
+        process.execPath,
+        ["dist/index.js"],
+        {
+          DATABASE_URL: databaseUrl,
+          WORLD_MODEL_PORT: String(worldModelBetaPort),
+          WORLD_MODEL_INTERVAL_MS: "250",
+          WORLD_MODEL_AGENT_ID: "world-model-beta",
+          WORLD_MODEL_AGENT_PROFILE: "market",
         },
         path.join(repoRoot, "services", "world-model"),
       ),
@@ -386,6 +425,68 @@ async function main() {
           PROPOSAL_AGENT_INTERVAL_MS: "250",
         },
         path.join(repoRoot, "services", "proposal-agent"),
+      ),
+    );
+    processes.push(
+      startProcess(
+        "scenario-agent-base",
+        process.execPath,
+        ["dist/index.js"],
+        {
+          DATABASE_URL: databaseUrl,
+          SCENARIO_AGENT_PORT: String(scenarioBasePort),
+          SCENARIO_AGENT_INTERVAL_MS: "250",
+          SCENARIO_AGENT_ID: "scenario-base",
+          SCENARIO_LABEL: "base",
+          SCENARIO_PROBABILITY: "0.5",
+        },
+        path.join(repoRoot, "services", "scenario-agent"),
+      ),
+    );
+    processes.push(
+      startProcess(
+        "scenario-agent-bull",
+        process.execPath,
+        ["dist/index.js"],
+        {
+          DATABASE_URL: databaseUrl,
+          SCENARIO_AGENT_PORT: String(scenarioBullPort),
+          SCENARIO_AGENT_INTERVAL_MS: "250",
+          SCENARIO_AGENT_ID: "scenario-bull",
+          SCENARIO_LABEL: "bull",
+          SCENARIO_PROBABILITY: "0.3",
+        },
+        path.join(repoRoot, "services", "scenario-agent"),
+      ),
+    );
+    processes.push(
+      startProcess(
+        "scenario-agent-bear",
+        process.execPath,
+        ["dist/index.js"],
+        {
+          DATABASE_URL: databaseUrl,
+          SCENARIO_AGENT_PORT: String(scenarioBearPort),
+          SCENARIO_AGENT_INTERVAL_MS: "250",
+          SCENARIO_AGENT_ID: "scenario-bear",
+          SCENARIO_LABEL: "bear",
+          SCENARIO_PROBABILITY: "0.2",
+        },
+        path.join(repoRoot, "services", "scenario-agent"),
+      ),
+    );
+    processes.push(
+      startProcess(
+        "synthesis-agent",
+        process.execPath,
+        ["dist/index.js"],
+        {
+          DATABASE_URL: databaseUrl,
+          SYNTHESIS_AGENT_PORT: String(synthesisPort),
+          SYNTHESIS_AGENT_INTERVAL_MS: "250",
+          SYNTHESIS_AGENT_ID: "synthesis-core",
+        },
+        path.join(repoRoot, "services", "synthesis-agent"),
       ),
     );
     processes.push(
@@ -448,7 +549,13 @@ async function main() {
     await waitForJson("http://127.0.0.1:4005/health");
     await waitForJson("http://127.0.0.1:4006/health");
     await waitForJson(`http://127.0.0.1:${worldInputPort}/health`);
-    await waitForJson(`http://127.0.0.1:${worldModelPort}/health`);
+    await waitForJson(`http://127.0.0.1:${orchestratorPort}/health`);
+    await waitForJson(`http://127.0.0.1:${worldModelAlphaPort}/health`);
+    await waitForJson(`http://127.0.0.1:${worldModelBetaPort}/health`);
+    await waitForJson(`http://127.0.0.1:${scenarioBasePort}/health`);
+    await waitForJson(`http://127.0.0.1:${scenarioBullPort}/health`);
+    await waitForJson(`http://127.0.0.1:${scenarioBearPort}/health`);
+    await waitForJson(`http://127.0.0.1:${synthesisPort}/health`);
     await waitForJson(`http://127.0.0.1:${proposalAgentPort}/health`);
     await waitForJson(`http://127.0.0.1:${collectorAlphaPort}/health`);
     await waitForJson(`http://127.0.0.1:${collectorBetaPort}/health`);
@@ -462,11 +569,44 @@ async function main() {
       return signals.items.length >= 2;
     });
 
-    await waitForCondition("world hypotheses", async () => {
-      const hypotheses = (await waitForJson(`http://127.0.0.1:${worldModelPort}/v1/internal/world-hypotheses`)) as {
+    await waitForCondition("simulation run", async () => {
+      const runs = (await waitForJson(`http://127.0.0.1:${orchestratorPort}/v1/internal/simulation-runs`)) as {
         items: Array<{ status: string }>;
       };
-      return hypotheses.items.length >= 2;
+      return runs.items.length >= 1;
+    });
+
+    await waitForCondition("world-state proposals", async () => {
+      const proposals = (await waitForJson(
+        `http://127.0.0.1:${worldModelAlphaPort}/v1/internal/world-state-proposals`,
+      )) as {
+        items: Array<{ agent_id: string }>;
+      };
+      return proposals.items.length >= 2;
+    });
+
+    await waitForCondition("direct belief proposals", async () => {
+      const beliefs = (await waitForJson(
+        `http://127.0.0.1:${worldModelAlphaPort}/v1/internal/world-model-hypotheses`,
+      )) as {
+        items: Array<{ agent_id: string }>;
+      };
+      return beliefs.items.length >= 2;
+    });
+
+    await waitForCondition("scenario paths", async () => {
+      const paths = (await waitForJson(`http://127.0.0.1:${scenarioBasePort}/v1/internal/scenario-paths`)) as {
+        items: Array<{ label: string }>;
+      };
+      const labels = new Set(paths.items.map((entry) => entry.label));
+      return paths.items.length >= 3 && labels.has("base") && labels.has("bull") && labels.has("bear");
+    });
+
+    await waitForCondition("synthesized beliefs", async () => {
+      const beliefs = (await waitForJson(`http://127.0.0.1:${synthesisPort}/v1/internal/synthesized-beliefs`)) as {
+        items: Array<{ status: string }>;
+      };
+      return beliefs.items.length >= 2;
     });
 
     await waitForCondition("published proposals", async () => {
@@ -556,7 +696,17 @@ async function main() {
       );
     }
 
-    for (const process of ["proposal-agent", "world-model", "world-input"]) {
+    for (const process of [
+      "proposal-agent",
+      "synthesis-agent",
+      "scenario-agent-base",
+      "scenario-agent-bull",
+      "scenario-agent-bear",
+      "world-model-alpha",
+      "world-model-beta",
+      "simulation-orchestrator",
+      "world-input",
+    ]) {
       const service = processes.find((entry) => entry.name === process);
       if (!service) {
         throw new Error(`${process} process not found`);

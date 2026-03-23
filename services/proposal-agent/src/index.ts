@@ -3,29 +3,25 @@ import { createDatabasePool, ensureCoreSchema, parseJsonField, toIsoTimestamp } 
 import type { ResolutionSpec } from "@automakit/sdk-types";
 import {
   normalizeAllowedDomainsFromUrl,
-  type PriceThresholdHypothesisMetadata,
-  type RateDecisionHypothesisMetadata,
-  type SuggestedResolutionMetadata,
-  type WorldHypothesis,
+  type BeliefHypothesisProposal,
+  type ProposalCandidate,
+  type SynthesizedBelief,
 } from "@automakit/world-sim";
 
-type WorldHypothesisRow = {
+type SynthesizedBeliefRow = {
   id: string;
-  source_signal_ids: unknown;
-  category: string;
-  subject: string;
-  predicate: string;
-  target_time: unknown;
+  run_id: string;
+  agent_id: string;
+  belief_dedupe_key: string;
+  parent_hypothesis_ids: unknown;
+  agreement_score: unknown;
+  disagreement_score: unknown;
   confidence_score: unknown;
-  reasoning_summary: string;
-  machine_resolvable: boolean;
-  suggested_resolution_kind: "price_threshold" | "rate_decision" | null;
-  suggested_resolution_source_url: string | null;
-  suggested_resolution_metadata: unknown;
-  status: WorldHypothesis["status"];
+  conflict_notes: string | null;
+  hypothesis: unknown;
+  status: SynthesizedBelief["status"];
   suppression_reason: string | null;
   linked_proposal_id: string | null;
-  dedupe_key: string;
   created_at: unknown;
   updated_at: unknown;
 };
@@ -42,26 +38,20 @@ let tickInFlight = false;
 let lastTickAt: string | null = null;
 let lastTickError: string | null = null;
 
-function mapHypothesisRow(row: WorldHypothesisRow): WorldHypothesis {
+function mapSynthesizedBeliefRow(row: SynthesizedBeliefRow): SynthesizedBelief {
   return {
     id: row.id,
-    source_signal_ids: parseJsonField<string[]>(row.source_signal_ids),
-    category: row.category,
-    subject: row.subject,
-    predicate: row.predicate,
-    target_time: toIsoTimestamp(row.target_time),
+    run_id: row.run_id,
+    agent_id: row.agent_id,
+    parent_hypothesis_ids: parseJsonField<string[]>(row.parent_hypothesis_ids),
+    agreement_score: Number(row.agreement_score),
+    disagreement_score: Number(row.disagreement_score),
     confidence_score: Number(row.confidence_score),
-    reasoning_summary: row.reasoning_summary,
-    machine_resolvable: Boolean(row.machine_resolvable),
-    suggested_resolution_kind: row.suggested_resolution_kind ?? undefined,
-    suggested_resolution_source_url: row.suggested_resolution_source_url ?? undefined,
-    suggested_resolution_metadata: row.suggested_resolution_metadata
-      ? parseJsonField<SuggestedResolutionMetadata>(row.suggested_resolution_metadata)
-      : undefined,
+    conflict_notes: row.conflict_notes,
+    hypothesis: parseJsonField<BeliefHypothesisProposal>(row.hypothesis),
     status: row.status,
     suppression_reason: row.suppression_reason,
     linked_proposal_id: row.linked_proposal_id,
-    dedupe_key: row.dedupe_key,
     created_at: toIsoTimestamp(row.created_at),
     updated_at: toIsoTimestamp(row.updated_at),
   };
@@ -80,7 +70,7 @@ function formatThreshold(value: number) {
   return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(value);
 }
 
-function operatorPhrase(operator: PriceThresholdHypothesisMetadata["operator"]) {
+function operatorPhrase(operator: "gt" | "gte" | "lt" | "lte") {
   switch (operator) {
     case "gte":
       return "at or above";
@@ -94,155 +84,82 @@ function operatorPhrase(operator: PriceThresholdHypothesisMetadata["operator"]) 
   }
 }
 
-function buildPriceThresholdCandidate(hypothesis: WorldHypothesis, metadata: PriceThresholdHypothesisMetadata) {
-  const allowedDomains = normalizeAllowedDomainsFromUrl(metadata.canonical_source_url);
-  const thresholdLabel = formatThreshold(metadata.threshold);
-  const dateLabel = formatDateLabel(hypothesis.target_time);
-  const resolutionSpec: ResolutionSpec = {
-    kind: "price_threshold",
-    source: {
-      adapter: "http_json",
-      canonical_url: metadata.canonical_source_url,
-      allowed_domains: allowedDomains,
-    },
-    observation_schema: {
-      type: "object",
-      fields: {
-        price: {
-          type: "number",
-          path: "price",
-        },
-        observed_at: {
-          type: "string",
-          path: "observed_at",
-          required: false,
-        },
+function buildPriceThresholdCandidate(belief: SynthesizedBelief, resolutionSpec: ResolutionSpec): ProposalCandidate {
+  if (resolutionSpec.kind !== "price_threshold") {
+    throw new Error("belief_resolution_kind_mismatch");
+  }
+
+  const threshold = resolutionSpec.decision_rule.threshold;
+  const operator = resolutionSpec.decision_rule.operator;
+  const thresholdLabel = formatThreshold(threshold);
+  const dateLabel = formatDateLabel(belief.hypothesis.target_time);
+  const asset = belief.hypothesis.subject;
+
+  return {
+    title: `Will ${asset} trade ${operatorPhrase(operator)} $${thresholdLabel} by ${dateLabel}?`,
+    category: belief.hypothesis.category,
+    close_time: belief.hypothesis.target_time,
+    resolution_criteria: `Resolve YES if ${asset} spot price trades ${operatorPhrase(operator)} $${thresholdLabel} on or before ${dateLabel} using ${resolutionSpec.source.canonical_url}.`,
+    resolution_spec: {
+      ...resolutionSpec,
+      source: {
+        ...resolutionSpec.source,
+        allowed_domains: normalizeAllowedDomainsFromUrl(resolutionSpec.source.canonical_url),
       },
     },
-    decision_rule: {
-      kind: "price_threshold",
-      observation_field: "price",
-      operator: metadata.operator,
-      threshold: metadata.threshold,
-    },
-    quorum_rule: {
-      min_observations: 2,
-      min_distinct_collectors: 2,
-      agreement: "all",
-    },
-    quarantine_rule: {
-      on_source_fetch_failure: true,
-      on_schema_validation_failure: true,
-      on_observation_conflict: true,
-      max_observation_age_seconds: 3600,
-    },
-  };
-
-  return {
-    title: `Will ${metadata.asset_symbol} trade ${operatorPhrase(metadata.operator)} $${thresholdLabel} by ${dateLabel}?`,
-    category: metadata.category,
-    close_time: hypothesis.target_time,
-    resolution_criteria: `Resolve YES if ${metadata.asset_symbol} spot price trades ${operatorPhrase(
-      metadata.operator,
-    )} $${thresholdLabel} on or before ${dateLabel} using ${metadata.canonical_source_url}.`,
-    resolution_spec: resolutionSpec,
+    dedupe_key: belief.hypothesis.dedupe_key,
+    source_belief_id: belief.id,
   };
 }
 
-function buildRateDecisionCandidate(hypothesis: WorldHypothesis, metadata: RateDecisionHypothesisMetadata) {
-  const allowedDomains = normalizeAllowedDomainsFromUrl(metadata.canonical_source_url);
-  const dateLabel = formatDateLabel(hypothesis.target_time);
-  const verb =
-    metadata.direction === "hold" ? "hold rates" : metadata.direction === "hike" ? "hike rates" : "cut rates";
-  const resolutionSpec: ResolutionSpec = {
-    kind: "rate_decision",
-    source: {
-      adapter: "http_json",
-      canonical_url: metadata.canonical_source_url,
-      allowed_domains: allowedDomains,
-    },
-    observation_schema: {
-      type: "object",
-      fields: {
-        previous_upper_bound_bps: {
-          type: "number",
-          path: "previous_upper_bound_bps",
-        },
-        current_upper_bound_bps: {
-          type: "number",
-          path: "current_upper_bound_bps",
-        },
-        observed_at: {
-          type: "string",
-          path: "observed_at",
-          required: false,
-        },
+function buildRateDecisionCandidate(belief: SynthesizedBelief, resolutionSpec: ResolutionSpec): ProposalCandidate {
+  if (resolutionSpec.kind !== "rate_decision") {
+    throw new Error("belief_resolution_kind_mismatch");
+  }
+
+  const direction = resolutionSpec.decision_rule.direction;
+  const verb = direction === "hold" ? "hold rates" : direction === "hike" ? "hike rates" : "cut rates";
+  const dateLabel = formatDateLabel(belief.hypothesis.target_time);
+  const institution = belief.hypothesis.subject;
+
+  return {
+    title: `Will ${institution} ${verb} by ${dateLabel}?`,
+    category: belief.hypothesis.category,
+    close_time: belief.hypothesis.target_time,
+    resolution_criteria: `Resolve YES if ${institution} ${verb} on or before ${dateLabel} using ${resolutionSpec.source.canonical_url}.`,
+    resolution_spec: {
+      ...resolutionSpec,
+      source: {
+        ...resolutionSpec.source,
+        allowed_domains: normalizeAllowedDomainsFromUrl(resolutionSpec.source.canonical_url),
       },
     },
-    decision_rule: {
-      kind: "rate_decision",
-      previous_field: "previous_upper_bound_bps",
-      current_field: "current_upper_bound_bps",
-      direction: metadata.direction,
-    },
-    quorum_rule: {
-      min_observations: 2,
-      min_distinct_collectors: 2,
-      agreement: "all",
-    },
-    quarantine_rule: {
-      on_source_fetch_failure: true,
-      on_schema_validation_failure: true,
-      on_observation_conflict: true,
-      max_observation_age_seconds: 3600,
-    },
-  };
-
-  return {
-    title: `Will ${metadata.institution} ${verb} by ${dateLabel}?`,
-    category: metadata.category,
-    close_time: hypothesis.target_time,
-    resolution_criteria: `Resolve YES if ${metadata.institution} ${verb} on or before ${dateLabel} using ${metadata.canonical_source_url}.`,
-    resolution_spec: resolutionSpec,
+    dedupe_key: belief.hypothesis.dedupe_key,
+    source_belief_id: belief.id,
   };
 }
 
-function buildProposalCandidate(hypothesis: WorldHypothesis) {
-  if (!hypothesis.machine_resolvable) {
-    throw new Error("hypothesis_not_machine_resolvable");
-  }
-  if (!hypothesis.suggested_resolution_kind || !hypothesis.suggested_resolution_metadata) {
-    throw new Error("hypothesis_missing_resolution_metadata");
+function buildProposalCandidate(belief: SynthesizedBelief) {
+  const resolutionSpec = belief.hypothesis.suggested_resolution_spec;
+  if (!belief.hypothesis.machine_resolvable || !resolutionSpec) {
+    throw new Error("belief_not_machine_resolvable");
   }
 
-  const base =
-    hypothesis.suggested_resolution_kind === "price_threshold"
-      ? buildPriceThresholdCandidate(
-          hypothesis,
-          hypothesis.suggested_resolution_metadata as PriceThresholdHypothesisMetadata,
-        )
-      : hypothesis.suggested_resolution_kind === "rate_decision"
-        ? buildRateDecisionCandidate(
-            hypothesis,
-            hypothesis.suggested_resolution_metadata as RateDecisionHypothesisMetadata,
-          )
-        : null;
-
-  if (!base) {
-    throw new Error("hypothesis_resolution_kind_unsupported");
+  switch (resolutionSpec.kind) {
+    case "price_threshold":
+      return buildPriceThresholdCandidate(belief, resolutionSpec);
+    case "rate_decision":
+      return buildRateDecisionCandidate(belief, resolutionSpec);
+    default:
+      throw new Error("belief_resolution_kind_unsupported");
   }
-
-  return {
-    ...base,
-    dedupe_key: hypothesis.dedupe_key,
-  };
 }
 
-async function fetchNewHypotheses(limit: number) {
-  const result = await pool.query<WorldHypothesisRow>(
+async function fetchNewBeliefs(limit: number) {
+  const result = await pool.query<SynthesizedBeliefRow>(
     `
       SELECT *
-      FROM world_hypotheses
+      FROM synthesized_beliefs
       WHERE status = 'new'
       ORDER BY created_at ASC, id ASC
       LIMIT $1
@@ -250,39 +167,30 @@ async function fetchNewHypotheses(limit: number) {
     [limit],
   );
 
-  return result.rows.map(mapHypothesisRow);
+  return result.rows.map(mapSynthesizedBeliefRow);
 }
 
-async function suppressHypothesis(hypothesisId: string, reason: string) {
+async function updateBeliefStatus(
+  beliefId: string,
+  status: SynthesizedBelief["status"],
+  options: { reason?: string | null; proposalId?: string | null } = {},
+) {
   await pool.query(
     `
-      UPDATE world_hypotheses
+      UPDATE synthesized_beliefs
       SET
-        status = 'suppressed',
-        suppression_reason = $2,
+        status = $2,
+        suppression_reason = COALESCE($3, suppression_reason),
+        linked_proposal_id = COALESCE($4, linked_proposal_id),
         updated_at = NOW()
       WHERE id = $1
     `,
-    [hypothesisId, reason],
+    [beliefId, status, options.reason ?? null, options.proposalId ?? null],
   );
 }
 
-async function markHypothesisProposed(hypothesisId: string, proposalId: string | null) {
-  await pool.query(
-    `
-      UPDATE world_hypotheses
-      SET
-        status = 'proposed',
-        linked_proposal_id = COALESCE($2, linked_proposal_id),
-        updated_at = NOW()
-      WHERE id = $1
-    `,
-    [hypothesisId, proposalId],
-  );
-}
-
-async function submitProposal(hypothesis: WorldHypothesis) {
-  const proposal = buildProposalCandidate(hypothesis);
+async function submitProposal(belief: SynthesizedBelief) {
+  const proposal = buildProposalCandidate(belief);
   const response = await fetch(`${proposalPipelineUrl}/v1/market-proposals`, {
     method: "POST",
     headers: {
@@ -299,7 +207,7 @@ async function submitProposal(hypothesis: WorldHypothesis) {
       resolution_spec: proposal.resolution_spec,
       dedupe_key: proposal.dedupe_key,
       origin: "automation",
-      signal_source_id: hypothesis.id,
+      signal_source_id: proposal.source_belief_id,
       signal_source_type: "agent",
     }),
   });
@@ -319,18 +227,18 @@ async function tick() {
 
   tickInFlight = true;
   try {
-    const hypotheses = await fetchNewHypotheses(batchSize);
-    for (const hypothesis of hypotheses) {
+    const beliefs = await fetchNewBeliefs(batchSize);
+    for (const belief of beliefs) {
       try {
-        const proposalId = await submitProposal(hypothesis);
-        await markHypothesisProposed(hypothesis.id, proposalId);
+        const proposalId = await submitProposal(belief);
+        await updateBeliefStatus(belief.id, "proposed", { proposalId });
       } catch (error) {
         if (
-          String(error).includes("hypothesis_not_machine_resolvable") ||
-          String(error).includes("hypothesis_missing_resolution_metadata") ||
-          String(error).includes("hypothesis_resolution_kind_unsupported")
+          String(error).includes("belief_not_machine_resolvable") ||
+          String(error).includes("belief_resolution_kind_unsupported") ||
+          String(error).includes("belief_resolution_kind_mismatch")
         ) {
-          await suppressHypothesis(hypothesis.id, String(error));
+          await updateBeliefStatus(belief.id, "suppressed", { reason: String(error) });
           continue;
         }
 
@@ -355,6 +263,20 @@ app.get("/health", async () => ({
   last_tick_at: lastTickAt,
   last_tick_error: lastTickError,
 }));
+
+app.get("/v1/internal/proposal-agent/candidates", async () => {
+  const result = await pool.query<SynthesizedBeliefRow>(
+    `
+      SELECT *
+      FROM synthesized_beliefs
+      ORDER BY created_at DESC, id DESC
+    `,
+  );
+
+  return {
+    items: result.rows.map(mapSynthesizedBeliefRow),
+  };
+});
 
 app.post("/v1/internal/proposal-agent/run-once", async () => {
   await tick();

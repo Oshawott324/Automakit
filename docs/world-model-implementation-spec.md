@@ -1,95 +1,156 @@
-# World-Model And Proposal-Agent Implementation Spec
+# Agent Simulation Fabric Spec
 
 ## 1. Goal
 
-Add platform-owned world-input, world-model, and proposal-agent services so market generation no longer depends only on external structured `MarketSignal` feeds.
+Replace the current rule-based single-path `world-model` implementation with an agent-simulated upstream layer.
 
-The system must be able to start from an empty runtime, poll canonical upstream sources automatically, generate typed hypotheses, convert eligible hypotheses into machine-resolvable market proposals, and publish markets through the existing proposal pipeline.
+The target system should:
 
-This layer is upstream of listing and strictly separate from settlement:
+- let platform-owned agents interpret the world rather than encode the belief logic in deterministic platform code,
+- let platform-owned agents generate multiple future paths rather than one flat forecast,
+- keep the platform deterministic only at the boundary contracts,
+- preserve strict separation between simulated beliefs and settlement truth.
 
-- world-model output may influence which markets exist,
-- world-model output must never directly resolve a market.
+The new upstream loop should be built around:
 
-## 2. Scope
+- `simulation-orchestrator`
+- `world-model agents`
+- `scenario agents`
+- `synthesis agents`
+- `proposal agents`
+- deterministic boundary contracts only
 
-This spec covers:
+## 2. Core Principle
 
-- `packages/world-sim`
-- `services/world-input`
-- `services/world-model`
-- `services/proposal-agent`
-- required persistence schema
-- internal APIs between the new services and existing proposal-pipeline
-- autonomous feed startup and steady-state polling
-- live-test requirements
+Automakit should not implement the belief layer as a hardcoded engine.
 
-This spec does not require a full social simulator in the first tranche.
+Instead:
 
-## 3. Operating Model
+- agents simulate the world,
+- the platform enforces schemas, permissions, persistence, and admission rules,
+- canonical sources settle truth.
 
-The world-generation loop is:
+So the platform is not the simulator. It is the runtime, contract layer, and market gateway for upstream simulation agents.
 
-1. `world-input` polls configured external and internal sources.
-2. `world-input` writes normalized `world_signals`.
-3. `world-model` consumes fresh `world_signals` and emits `world_hypotheses`.
-4. `proposal-agent` converts eligible `world_hypotheses` into typed market proposals.
-5. `proposal-pipeline` validates, dedupes, scores, and publishes or suppresses.
-6. `market-service` creates markets from published proposals.
+## 3. Deterministic Boundary Contracts Only
 
-This loop runs continuously without direct human intervention.
+The platform should be deterministic only where trust and reproducibility require it.
 
-## 4. Design Constraints
+These parts should remain deterministic:
 
-- Start with deterministic enrichment, not freeform simulation.
-- Prefer typed intermediate records over opaque prose.
-- Keep settlement truth in `resolution-service` and canonical source adapters only.
-- Use Postgres as the durable work log and state store.
-- Treat the existing `proposal-pipeline` as the listing gate.
-- Keep all new services restart-safe and idempotent.
+- signal schema validation
+- world-state and scenario artifact schemas
+- storage format
+- agent role permissions
+- proposal dedupe and overlap checks
+- machine-resolvability checks
+- publication policy
+- typed `resolution_spec` validation
+- settlement from canonical sources
+- payout logic
 
-## 5. New Packages And Services
+These parts should be agent-driven rather than hardcoded:
 
-### 5.1 `packages/world-sim`
+- world interpretation
+- causal reasoning
+- regime inference
+- confidence formation
+- multi-path scenario generation
+- synthesis of competing hypotheses
+- proposal drafting
 
-Purpose:
+## 4. Target Operating Model
 
-- shared types
-- validation helpers
-- normalization helpers
-- no network IO
-- no database access
+The upgraded upstream loop should be:
 
-Initial exports:
+1. `world-input` polls canonical upstream sources and writes `world_signals`.
+2. `simulation-orchestrator` selects which simulation tasks to run.
+3. `world-model agents` interpret fresh signals and emit proposed `world_state` updates and direct hypotheses.
+4. `scenario agents` consume current world state and generate several future paths.
+5. `synthesis agents` merge direct and scenario outputs into typed `belief_hypotheses`.
+6. `proposal agents` convert eligible hypotheses into candidate markets.
+7. `proposal-pipeline` validates, dedupes, scores, and publishes or suppresses.
 
-- `WorldSignal`
-- `WorldSignalSourceType`
-- `WorldEntityRef`
-- `WorldHypothesis`
-- `WorldHypothesisStatus`
-- `ProposalCandidate`
-- `WorldInputCursor`
-- `SourceAdapterKind`
+Settlement remains downstream and separate:
 
-Suggested first interfaces:
+8. `resolution-collector` fetches canonical sources.
+9. `resolution-service` resolves only from verified observations plus typed rules.
+
+## 5. Service Roles
+
+### 5.1 `services/simulation-orchestrator`
+
+This should be the control plane for the belief layer.
+
+Responsibilities:
+
+- watch new `world_signals`
+- schedule simulation tasks
+- decide which agent classes to invoke
+- assign run ids and work batches
+- manage retries, timeouts, and stale work
+- collect outputs from world-model, scenario, and synthesis agents
+- move tasks through deterministic state transitions
+
+This service should not decide beliefs. It should coordinate agents that do.
+
+### 5.2 `world-model agents`
+
+Responsibilities:
+
+- interpret newly ingested signals,
+- propose updates to `world_state`,
+- emit direct hypotheses about likely outcomes,
+- attach reasoning summaries and evidence references,
+- optionally emit regime labels as agent output.
+
+These agents are allowed to disagree. The platform should store several outputs rather than assume one authoritative answer.
+
+### 5.3 `scenario agents`
+
+Responsibilities:
+
+- consume current world context,
+- generate several plausible future paths,
+- attach path narratives and path probabilities,
+- emit path-scoped hypotheses.
+
+These agents should not be treated as truth authorities. They are producers of possible futures only.
+
+### 5.4 `synthesis agents`
+
+Responsibilities:
+
+- merge outputs from several world-model and scenario agents,
+- detect agreement and divergence,
+- produce a smaller set of typed `belief_hypotheses`,
+- emit confidence reasoning and conflict notes,
+- mark hypotheses as too ambiguous when agreement is too weak.
+
+This layer lets the system benefit from multiple agents without forcing the platform itself to “think.”
+
+### 5.5 `proposal agents`
+
+Responsibilities:
+
+- read synthesized hypotheses,
+- draft market titles and typed `resolution_spec`,
+- submit only machine-resolvable proposals,
+- suppress hypotheses that cannot become safe markets.
+
+Proposal agents remain upstream of listing. They do not publish directly.
+
+## 6. Shared Contracts In `packages/world-sim`
+
+The shared package should define contracts and validators, not belief logic.
+
+### 6.1 Signal contract
 
 ```ts
-export type WorldSignalSourceType =
-  | "economic_calendar"
-  | "price_feed"
-  | "filing"
-  | "official_announcement"
-  | "news"
-  | "market_internal";
-
-export type WorldEntityRef = {
-  kind: "asset" | "institution" | "person" | "issuer" | "event";
-  value: string;
-};
-
 export type WorldSignal = {
   id: string;
   source_type: WorldSignalSourceType;
+  source_adapter: string;
   source_id: string;
   source_url: string;
   trust_tier: "official" | "exchange" | "curated" | "derived";
@@ -101,129 +162,164 @@ export type WorldSignal = {
   entity_refs: WorldEntityRef[];
   dedupe_key: string;
 };
+```
 
-export type WorldHypothesis = {
+### 6.2 World-state proposal contract
+
+```ts
+export type WorldStateProposal = {
   id: string;
+  run_id: string;
+  agent_id: string;
   source_signal_ids: string[];
+  as_of: string;
+  entities: WorldEntityState[];
+  active_events: ActiveWorldEvent[];
+  factors: WorldFactorState[];
+  regime_labels: string[];
+  reasoning_summary: string;
+  created_at: string;
+};
+```
+
+### 6.3 Scenario-path contract
+
+```ts
+export type ScenarioPathProposal = {
+  id: string;
+  run_id: string;
+  agent_id: string;
+  label: "base" | "bull" | "bear" | "stress" | string;
+  probability: number;
+  narrative: string;
+  factor_deltas: Record<string, unknown>;
+  path_events: ScenarioEvent[];
+  created_at: string;
+};
+```
+
+### 6.4 Hypothesis contract
+
+```ts
+export type BeliefHypothesisProposal = {
+  id: string;
+  run_id: string;
+  agent_id: string;
+  parent_ids: string[];
+  hypothesis_kind:
+    | "price_threshold"
+    | "rate_decision"
+    | "filing_detected"
+    | "game_result";
   category: string;
   subject: string;
   predicate: string;
   target_time: string;
   confidence_score: number;
   reasoning_summary: string;
+  source_signal_ids: string[];
   machine_resolvable: boolean;
-  suggested_resolution_kind?: string;
-  suggested_resolution_source_url?: string;
-  status: "new" | "proposed" | "suppressed";
-  dedupe_key: string;
+  suggested_resolution_spec?: Record<string, unknown>;
   created_at: string;
 };
+```
 
-export type ProposalCandidate = {
-  title: string;
-  category: string;
-  close_time: string;
-  resolution_criteria: string;
-  resolution_spec: Record<string, unknown>;
-  dedupe_key: string;
-  source_hypothesis_id: string;
+### 6.5 Synthesis contract
+
+```ts
+export type SynthesizedBelief = {
+  id: string;
+  run_id: string;
+  agent_id: string;
+  parent_hypothesis_ids: string[];
+  agreement_score: number;
+  disagreement_score: number;
+  confidence_score: number;
+  conflict_notes?: string;
+  hypothesis: BeliefHypothesisProposal;
+  status: "new" | "ambiguous" | "proposed" | "suppressed";
+  created_at: string;
 };
 ```
 
-### 5.2 `services/world-input`
+These contracts should be validated structurally by the platform. The contents are still agent-generated.
 
-Purpose:
+## 7. Persistence Model
 
-- poll upstream sources on schedule
-- normalize responses into `WorldSignal`
-- write `world_signals`
-- maintain polling cursors and backoff state
+The persistence layer now uses an explicit multi-agent run model.
 
-This service is the answer to the “how does the world auto-feed” question.
+### 7.1 Keep
 
-### 5.3 `services/world-model`
+- `world_signals`
+- `world_input_cursors`
 
-Purpose:
-
-- consume fresh `world_signals`
-- group related signals
-- enrich entities, deadlines, thresholds, and event types
-- emit typed `world_hypotheses`
-
-This service should start as a typed enrichment engine, not a general LLM sandbox.
-
-### 5.4 `services/proposal-agent`
-
-Purpose:
-
-- read eligible `world_hypotheses`
-- convert them into machine-resolvable market drafts
-- generate `resolution_criteria` and `resolution_spec`
-- submit drafts to `proposal-pipeline`
-- update hypothesis status to `proposed` or `suppressed`
-
-## 6. Persistence Additions
-
-Add these tables to [packages/persistence/src/index.ts](/Users/yifanjin/agentic_polymarket/packages/persistence/src/index.ts).
-
-### 6.1 `world_signals`
+### 7.2 Add
 
 ```sql
-CREATE TABLE IF NOT EXISTS world_signals (
+CREATE TABLE IF NOT EXISTS simulation_runs (
   id TEXT PRIMARY KEY,
-  source_type TEXT NOT NULL,
-  source_adapter TEXT NOT NULL,
-  source_id TEXT NOT NULL,
-  source_url TEXT NOT NULL,
-  trust_tier TEXT NOT NULL,
-  title TEXT NOT NULL,
-  summary TEXT NOT NULL,
-  payload JSONB NOT NULL,
-  entity_refs JSONB NOT NULL,
-  dedupe_key TEXT NOT NULL UNIQUE,
-  fetched_at TIMESTAMPTZ NOT NULL,
-  effective_at TIMESTAMPTZ,
+  run_type TEXT NOT NULL,
+  trigger_signal_ids JSONB NOT NULL,
+  status TEXT NOT NULL,
+  started_at TIMESTAMPTZ NOT NULL,
+  completed_at TIMESTAMPTZ,
+  failure_reason TEXT
+);
+
+CREATE TABLE IF NOT EXISTS world_state_proposals (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  source_signal_ids JSONB NOT NULL,
+  as_of TIMESTAMPTZ NOT NULL,
+  entities JSONB NOT NULL,
+  active_events JSONB NOT NULL,
+  factors JSONB NOT NULL,
+  regime_labels JSONB NOT NULL,
+  reasoning_summary TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL
 );
-```
 
-Indexes:
-
-- `(source_type, fetched_at DESC)`
-- `(created_at DESC)`
-
-### 6.2 `world_input_cursors`
-
-```sql
-CREATE TABLE IF NOT EXISTS world_input_cursors (
-  source_key TEXT PRIMARY KEY,
-  cursor_value TEXT,
-  last_polled_at TIMESTAMPTZ,
-  next_poll_at TIMESTAMPTZ NOT NULL,
-  backoff_until TIMESTAMPTZ,
-  failure_count INTEGER NOT NULL DEFAULT 0,
-  last_error TEXT,
-  updated_at TIMESTAMPTZ NOT NULL
-);
-```
-
-### 6.3 `world_hypotheses`
-
-```sql
-CREATE TABLE IF NOT EXISTS world_hypotheses (
+CREATE TABLE IF NOT EXISTS scenario_path_proposals (
   id TEXT PRIMARY KEY,
-  source_signal_ids JSONB NOT NULL,
+  run_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  label TEXT NOT NULL,
+  probability DOUBLE PRECISION NOT NULL,
+  narrative TEXT NOT NULL,
+  factor_deltas JSONB NOT NULL,
+  path_events JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS belief_hypothesis_proposals (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  parent_ids JSONB NOT NULL,
+  hypothesis_kind TEXT NOT NULL,
   category TEXT NOT NULL,
   subject TEXT NOT NULL,
   predicate TEXT NOT NULL,
   target_time TIMESTAMPTZ NOT NULL,
   confidence_score DOUBLE PRECISION NOT NULL,
   reasoning_summary TEXT NOT NULL,
+  source_signal_ids JSONB NOT NULL,
   machine_resolvable BOOLEAN NOT NULL,
-  suggested_resolution_kind TEXT,
-  suggested_resolution_source_url TEXT,
-  suggested_resolution_metadata JSONB,
-  dedupe_key TEXT NOT NULL UNIQUE,
+  suggested_resolution_spec JSONB,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS synthesized_beliefs (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  parent_hypothesis_ids JSONB NOT NULL,
+  agreement_score DOUBLE PRECISION NOT NULL,
+  disagreement_score DOUBLE PRECISION NOT NULL,
+  confidence_score DOUBLE PRECISION NOT NULL,
+  conflict_notes TEXT,
+  hypothesis JSONB NOT NULL,
   status TEXT NOT NULL,
   suppression_reason TEXT,
   linked_proposal_id TEXT,
@@ -232,304 +328,104 @@ CREATE TABLE IF NOT EXISTS world_hypotheses (
 );
 ```
 
-Indexes:
+### 7.3 Removed Legacy Path
 
-- `(status, created_at DESC)`
-- `(category, target_time DESC)`
+The legacy `world_hypotheses` table and the old single-path enrichment contract are no longer part of the active design. Proposal generation now reads only from `synthesized_beliefs`.
 
-### 6.4 Optional later tables
+## 8. Orchestrator Workflow
 
-Do not add these in the first tranche unless needed:
+`simulation-orchestrator` should run deterministic workflow transitions over non-deterministic agent work.
 
-- `scenario_runs`
-- `scenario_outputs`
-- `world_entities`
+### 8.1 Run lifecycle
 
-The first pass should stay focused on typed signal enrichment.
+1. detect fresh signals or state changes
+2. create `simulation_run`
+3. dispatch tasks to `world-model agents`
+4. wait for minimum required outputs
+5. dispatch tasks to `scenario agents`
+6. dispatch tasks to `synthesis agents`
+7. store final `synthesized_beliefs`
+8. hand eligible beliefs to `proposal-agent`
 
-## 7. Source Adapters For Auto-Feed
+### 8.2 Deterministic orchestration state
 
-`world-input` should support a small adapter registry.
+Only the workflow transitions should be platform-controlled:
 
-Initial adapters:
+- `pending`
+- `dispatched`
+- `collecting_outputs`
+- `synthesizing`
+- `ready_for_proposal`
+- `failed`
 
-- `http_json_calendar`
-- `http_json_price`
-- `http_json_filing`
-- `http_json_official_announcement`
-- `market_internal`
+## 9. Proposal Pipeline Boundary
 
-Each adapter must define:
+`proposal-pipeline` should remain a deterministic admission controller.
 
-- source key
-- poll cadence
-- optional backfill window
-- normalization function
-- trust tier
+It should validate:
 
-Suggested env shape:
+- schema correctness
+- duplicate or overlap risk
+- machine-resolvability
+- required `resolution_spec`
+- confidence and agreement thresholds
+- market-count limits by domain
 
-```env
-WORLD_INPUT_SOURCES_JSON=[
-  {
-    "key": "fed-calendar",
-    "adapter": "http_json_calendar",
-    "url": "https://example.test/fed-calendar.json",
-    "poll_interval_seconds": 300,
-    "backfill_hours": 72,
-    "trust_tier": "official"
-  },
-  {
-    "key": "btc-price",
-    "adapter": "http_json_price",
-    "url": "https://example.test/btc-price.json",
-    "poll_interval_seconds": 15,
-    "backfill_hours": 24,
-    "trust_tier": "exchange"
-  }
-]
-```
+It should not decide whether a hypothesis is “true.” That remains part of the upstream agent simulation layer.
 
-## 8. Auto-Feed Lifecycle
+## 10. Required Agent Roles
 
-### 8.1 Startup
+Platform-owned upstream roles should be explicit:
 
-On startup, `world-input` must:
+- `world_model`
+- `scenario`
+- `synthesis`
+- `proposal`
 
-1. load configured sources
-2. initialize or load source cursors
-3. perform immediate bootstrap polling
-4. backfill recent history if the source supports it
-5. store normalized `world_signals`
+Each should have:
 
-### 8.2 Steady-state polling
+- a stable `agent_id`
+- capability declaration
+- role-bound permissions
+- signed outputs
 
-For each source:
+Third-party agents should still default to trading roles, not simulation roles.
 
-- poll at configured cadence
-- normalize items into typed signals
-- dedupe by `dedupe_key`
-- update cursor state
-- apply exponential backoff on transient failures
+## 11. Live-Test Requirements
 
-### 8.3 Internal feedback
+This design is not implemented until a live test proves:
 
-Later, `market_internal` can emit signals from:
+1. `world-input` polls real configured sources.
+2. `simulation-orchestrator` creates a run automatically.
+3. at least two `world-model agents` submit state or direct hypotheses.
+4. at least two `scenario agents` submit future paths.
+5. at least one `synthesis agent` emits `synthesized_beliefs`.
+6. `proposal-agent` publishes at least one market from synthesized output.
+7. the market still resolves only through canonical sources and `resolution-service`.
 
-- unusual spread changes
-- repeated unresolved proposal themes
-- large order-flow changes
-- liquidity gaps
+## 12. Guardrails
 
-These are valid world-model inputs for belief generation but never for settlement.
+- Simulated beliefs must never be resolution evidence.
+- Scenario output must never bypass `proposal-pipeline`.
+- The platform should validate shape and permissions, not hardcode belief logic.
+- Conflicting agent outputs should be stored, not hidden.
+- The system should prefer ambiguity over fake certainty.
 
-## 9. World-Model Rules
+## 13. Implementation Status
 
-The first version of `world-model` must not depend on a large freeform simulation loop.
+Implemented:
 
-It should perform:
+1. `packages/world-sim` defines the agent-output contracts and validators.
+2. The run-based persistence tables are part of the core schema.
+3. `services/simulation-orchestrator` coordinates run state transitions.
+4. `services/world-model` operates as a world-model agent runtime surface.
+5. `services/scenario-agent` and `services/synthesis-agent` emit scenario paths and synthesized beliefs.
+6. `services/proposal-agent` reads `synthesized_beliefs`.
+7. The live test proves full orchestrated agent simulation before proposal publication and downstream autonomous resolution.
+8. The deprecated single-path enrichment path and `world_hypotheses` persistence path have been removed from the active runtime design.
 
-- entity linking
-- event classification
-- deadline extraction
-- threshold extraction
-- domain classification
-- source agreement scoring
-- machine-resolvability checks
+Remaining focus:
 
-Examples:
-
-- price signal -> `price_threshold` hypothesis
-- Fed decision signal -> `rate_decision` hypothesis
-- filing signal -> later `filing_detected` hypothesis once that resolution kind exists
-
-World-model output must be a typed `world_hypothesis`, not a ready-to-list market.
-
-## 10. Proposal-Agent Rules
-
-The proposal-agent converts a `world_hypothesis` into a proposal only if:
-
-- `machine_resolvable = true`
-- `suggested_resolution_kind` is supported by [packages/sdk-types/src/resolution-spec.ts](/Users/yifanjin/agentic_polymarket/packages/sdk-types/src/resolution-spec.ts)
-- a canonical source URL exists
-- close time can be derived unambiguously
-- title can be rendered as a clean binary question
-
-If any of those fail, the proposal-agent must suppress the hypothesis and store a suppression reason.
-
-Suggested deterministic mappings:
-
-- `price_threshold`
-  - title: `Will BTC close above $100,000 on June 30, 2026?`
-  - resolution criteria: explicit source, evaluation time, threshold rule
-- `rate_decision`
-  - title: `Will the Federal Reserve cut rates at the June 17, 2026 meeting?`
-  - resolution criteria: official release and cut/hold/hike rule
-
-## 11. Internal APIs
-
-### 11.1 `world-input`
-
-Read/write directly to Postgres for `world_signals` and `world_input_cursors`.
-
-Optional health endpoints:
-
-- `GET /health`
-- `GET /v1/internal/world-input/sources`
-
-### 11.2 `world-model`
-
-Suggested internal endpoints:
-
-- `GET /health`
-- `POST /v1/internal/world-model/run-once`
-- `GET /v1/internal/world-hypotheses?status=new`
-
-It may also run a loop with no external trigger in normal runtime.
-
-### 11.3 `proposal-agent`
-
-Suggested internal endpoints:
-
-- `GET /health`
-- `POST /v1/internal/proposal-agent/run-once`
-
-Submission target:
-
-- `POST /v1/market-proposals` on [services/proposal-pipeline/src/index.ts](/Users/yifanjin/agentic_polymarket/services/proposal-pipeline/src/index.ts)
-
-Required request shape:
-
-- `proposer_agent_id`
-- `title`
-- `category`
-- `close_time`
-- `resolution_criteria`
-- `resolution_spec`
-- `dedupe_key`
-- `origin = "automation"`
-- `signal_source_id = world_hypothesis.id`
-- `signal_source_type = "agent"`
-
-## 12. Service Ownership Boundaries
-
-- `world-input` owns source polling and normalization.
-- `world-model` owns hypothesis generation.
-- `proposal-agent` owns draft generation from hypotheses.
-- `proposal-pipeline` owns listing admission.
-- `resolution-service` owns settlement truth.
-
-No service in this new layer may:
-
-- directly create a market in `market-service`
-- directly resolve a market
-- treat simulated beliefs as settlement evidence
-
-## 13. Implementation Order
-
-### Step 1
-
-Add `packages/world-sim` with types and validators.
-
-Acceptance:
-
-- package builds
-- types are imported by new services
-
-### Step 2
-
-Add persistence schema for `world_signals`, `world_input_cursors`, and `world_hypotheses`.
-
-Acceptance:
-
-- schema migrates cleanly
-- restart-safe inserts and dedupe work
-
-### Step 3
-
-Add `services/world-input` with one adapter class:
-
-- `http_json_calendar`
-
-Acceptance:
-
-- service boots
-- polls configured source
-- stores normalized signals
-- backoff and dedupe work
-
-### Step 4
-
-Add `services/world-model` with deterministic enrichment for:
-
-- `price_threshold`
-- `rate_decision`
-
-Acceptance:
-
-- new signals produce hypotheses
-- invalid signals are ignored or suppressed
-
-### Step 5
-
-Add `services/proposal-agent`.
-
-Acceptance:
-
-- eligible hypotheses produce proposals
-- invalid hypotheses are suppressed with explicit reason
-- proposals are submitted idempotently
-
-### Step 6
-
-Connect the new services into the default dev stack and keep the old `market-creator` as fallback during rollout.
-
-Acceptance:
-
-- both paths can coexist
-- fallback can be disabled later
-
-## 14. Live Test Plan
-
-Add a new end-to-end test, for example:
-
-- `scripts/live-test-world-model.ts`
-
-The test must:
-
-1. boot disposable Postgres-backed services
-2. start a temporary feed server with:
-   - one price source
-   - one rate-decision source
-3. start `world-input`
-4. start `world-model`
-5. start `proposal-agent`
-6. start existing `proposal-pipeline` and `market-service`
-7. verify:
-   - `world_signals` inserted
-   - `world_hypotheses` created
-   - proposal submitted automatically
-   - market published automatically
-   - no direct test call to create the market
-
-This test should prove the platform can start from an empty runtime and generate markets from autonomous polling.
-
-## 15. Deferred Work
-
-Defer these until the first typed enrichment path is stable:
-
-- full `scenario-simulator` runtime
-- richer world entity graph
-- LLM-generated long-horizon social simulations
-- third-party simulation agents
-- proposal generation from fully synthetic scenario trajectories
-
-## 16. Success Criteria
-
-This tranche is complete when:
-
-- the world starts automatically from configured source polling,
-- new `world_signals` produce `world_hypotheses`,
-- eligible hypotheses generate market proposals automatically,
-- the existing proposal-pipeline remains the listing gate,
-- at least one live test proves end-to-end autonomous market generation without direct proposal injection from the test harness.
+1. broader source-adapter coverage,
+2. platform-owned liquidity bootstrap,
+3. further exchange hardening beyond replay-based recovery.

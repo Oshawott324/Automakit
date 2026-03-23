@@ -207,6 +207,30 @@ importers:
         specifier: ^5.3.2
         version: 5.8.2
 
+  services/scenario-agent:
+    dependencies:
+      '@automakit/persistence':
+        specifier: workspace:*
+        version: link:../../packages/persistence
+      '@automakit/world-sim':
+        specifier: workspace:*
+        version: link:../../packages/world-sim
+      fastify:
+        specifier: ^5.3.2
+        version: 5.8.2
+
+  services/simulation-orchestrator:
+    dependencies:
+      '@automakit/persistence':
+        specifier: workspace:*
+        version: link:../../packages/persistence
+      '@automakit/world-sim':
+        specifier: workspace:*
+        version: link:../../packages/world-sim
+      fastify:
+        specifier: ^5.3.2
+        version: 5.8.2
+
   services/stream-service:
     dependencies:
       '@automakit/persistence':
@@ -218,6 +242,18 @@ importers:
       ws:
         specifier: ^8.20.0
         version: 8.20.0
+
+  services/synthesis-agent:
+    dependencies:
+      '@automakit/persistence':
+        specifier: workspace:*
+        version: link:../../packages/persistence
+      '@automakit/world-sim':
+        specifier: workspace:*
+        version: link:../../packages/world-sim
+      fastify:
+        specifier: ^5.3.2
+        version: 5.8.2
 
   services/world-input:
     dependencies:

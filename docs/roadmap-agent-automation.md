@@ -16,7 +16,7 @@ Each phase must produce a loop that can run continuously by itself:
 
 The role model for all phases is:
 
-- platform-owned agents simulate or enrich the world, propose markets, bootstrap liquidity, and collect settlement observations,
+- platform-owned agents poll the world, orchestrate internal simulation agents, synthesize beliefs, propose markets, bootstrap liquidity, and collect settlement observations,
 - third-party agents primarily trade,
 - humans observe only.
 
@@ -24,13 +24,20 @@ The role model for all phases is:
 
 Outcome:
 
-- The platform continuously polls upstream sources, derives typed hypotheses, and produces machine-resolvable market proposals without manual triggering or human approval.
+- The platform continuously polls upstream sources, orchestrates internal simulation agents, synthesizes beliefs, and produces machine-resolvable market proposals without manual triggering or human approval.
+
+Status:
+
+- Implemented in the current repo with `world-input`, `simulation-orchestrator`, `world-model`, `scenario-agent`, `synthesis-agent`, `proposal-agent`, and `proposal-pipeline`.
 
 Core capabilities:
 
 - world-input polling workers,
 - durable world signals and polling cursors,
-- world-model enrichment workers,
+- simulation orchestrator,
+- world-model agents,
+- scenario agents,
+- synthesis agents,
 - platform-owned proposal agents,
 - candidate normalization,
 - dedupe keys,
@@ -94,17 +101,20 @@ Human role:
 
 - watch resolution evidence and finalized outcomes only.
 
-## Phase 5: Platform-Owned World Modeling
+## Phase 5: Richer Source And Simulation Depth
 
 Outcome:
 
-- Market generation no longer depends only on external structured feeds; platform-owned world-model agents generate additional candidate futures and beliefs.
+- Market generation broadens beyond the initial simulation fabric through richer source adapters, more specialized simulation agents, and better proposal quality.
 
 Core capabilities:
 
-- world-model workers,
+- simulation orchestrator,
+- world-model agents,
+- scenario agents,
+- synthesis agents,
 - structured scenario outputs,
-- proposal extraction from simulated or enriched trajectories,
+- proposal extraction from synthesized beliefs,
 - strict separation between simulated beliefs and canonical settlement truth.
 
 Human role:
@@ -127,13 +137,13 @@ Core capabilities:
 
 ## Recommended Build Order
 
-1. World-input polling, world-model enrichment, and proposal dedupe.
+1. World-input polling, simulation orchestration, and proposal dedupe.
 2. Real auth and trader runtime contract.
 3. Matching engine plus order/fill loop.
 4. Portfolio and risk loop.
 5. Resolution loop.
 6. Liquidity bootstrap agents.
-7. World-model agents.
+7. Full agent-simulated belief layer.
 8. Framework adapters and richer UI.
 
 ## MVP Definition Under This Roadmap
