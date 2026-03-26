@@ -57,6 +57,20 @@ async function waitForJson(url: string, attempts = 50) {
   throw new Error(`Timed out waiting for ${url}`);
 }
 
+async function postJson(url: string, body: unknown) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    throw new Error(`Request failed ${response.status} ${url}: ${await response.text()}`);
+  }
+  return response.json();
+}
+
 async function waitForText(url: string, expected: string, attempts = 50) {
   for (let index = 0; index < attempts; index += 1) {
     try {
@@ -213,6 +227,49 @@ async function main() {
       },
     ],
   };
+  const worldInputXPayload = {
+    data: [
+      {
+        id: "x-live-1",
+        text: "Macro desks tracking CPI and Fed path",
+        created_at: resolvedCloseTime,
+        author_id: "world-agent-1",
+      },
+    ],
+    meta: {
+      newest_id: "x-live-1",
+      result_count: 1,
+    },
+  };
+  const worldInputRedditPayload = {
+    data: {
+      children: [
+        {
+          data: {
+            id: "reddit-live-1",
+            subreddit: "economy",
+            title: "Fed path discussion",
+            selftext: "Community expects easing if inflation cools.",
+            created_utc: Math.floor(new Date(resolvedCloseTime).getTime() / 1000),
+            permalink: "/r/economy/comments/reddit-live-1/fed_path_discussion",
+          },
+        },
+      ],
+    },
+  };
+  const worldInputRssPayload = `<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <title>Automakit News</title>
+    <item>
+      <guid>rss-live-1</guid>
+      <title>Inflation cooldown headline</title>
+      <link>https://news.example/rss-live-1</link>
+      <description>Markets digest lower inflation prints.</description>
+      <pubDate>${new Date(resolvedCloseTime).toUTCString()}</pubDate>
+    </item>
+  </channel>
+</rss>`;
 
   let fedObservationCount = 0;
   function toJsonCompletion(content: unknown) {
@@ -497,6 +554,24 @@ async function main() {
       return;
     }
 
+    if (request.url?.startsWith("/world-input/x")) {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(worldInputXPayload));
+      return;
+    }
+
+    if (request.url?.startsWith("/world-input/reddit")) {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(worldInputRedditPayload));
+      return;
+    }
+
+    if (request.url?.startsWith("/world-input/rss")) {
+      response.writeHead(200, { "content-type": "application/rss+xml" });
+      response.end(worldInputRssPayload);
+      return;
+    }
+
     if (request.url === "/sources/btc") {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(
@@ -617,24 +692,7 @@ async function main() {
         ["dist/index.js"],
         {
           DATABASE_URL: databaseUrl,
-          WORLD_INPUT_SOURCES_JSON: JSON.stringify([
-            {
-              key: "btc-price",
-              adapter: "http_json_price",
-              url: `http://127.0.0.1:${feedPort}/world-input/price`,
-              poll_interval_seconds: 1,
-              backfill_hours: 24,
-              trust_tier: "exchange",
-            },
-            {
-              key: "fed-calendar",
-              adapter: "http_json_calendar",
-              url: `http://127.0.0.1:${feedPort}/world-input/fed-calendar`,
-              poll_interval_seconds: 1,
-              backfill_hours: 24,
-              trust_tier: "official",
-            },
-          ]),
+          WORLD_INPUT_BOOTSTRAP_SOURCES_JSON: "[]",
           WORLD_INPUT_PORT: String(worldInputPort),
           WORLD_INPUT_INTERVAL_MS: "250",
         },
@@ -848,11 +906,75 @@ async function main() {
     await waitForText("http://127.0.0.1:3000", "Markets");
     await waitForText("http://127.0.0.1:3001/proposals", "Proposal Queue");
 
+    await postJson(`http://127.0.0.1:${worldInputPort}/v1/internal/world-input/sources`, {
+      key: "btc-price",
+      adapter: "http_json_price",
+      url: `http://127.0.0.1:${feedPort}/world-input/price`,
+      poll_interval_seconds: 1,
+      backfill_hours: 24,
+      trust_tier: "exchange",
+    });
+    await postJson(`http://127.0.0.1:${worldInputPort}/v1/internal/world-input/sources`, {
+      key: "fed-calendar",
+      adapter: "http_json_calendar",
+      url: `http://127.0.0.1:${feedPort}/world-input/fed-calendar`,
+      poll_interval_seconds: 1,
+      backfill_hours: 24,
+      trust_tier: "official",
+    });
+    await postJson(`http://127.0.0.1:${worldInputPort}/v1/internal/world-input/sources`, {
+      key: "x-recent",
+      adapter: "x_api_recent_search",
+      url: `http://127.0.0.1:${feedPort}/world-input/x`,
+      poll_interval_seconds: 1,
+      trust_tier: "curated",
+      query: "btc OR fed",
+    });
+    await postJson(`http://127.0.0.1:${worldInputPort}/v1/internal/world-input/sources`, {
+      key: "reddit-economy",
+      adapter: "reddit_api_subreddit_new",
+      url: `http://127.0.0.1:${feedPort}/world-input/reddit`,
+      poll_interval_seconds: 1,
+      trust_tier: "curated",
+      subreddit: "economy",
+    });
+    await postJson(`http://127.0.0.1:${worldInputPort}/v1/internal/world-input/sources`, {
+      key: "news-rss",
+      adapter: "news_rss",
+      url: `http://127.0.0.1:${feedPort}/world-input/rss`,
+      poll_interval_seconds: 1,
+      trust_tier: "curated",
+    });
+
+    await waitForCondition("registered world-input sources", async () => {
+      const sources = (await waitForJson(
+        `http://127.0.0.1:${worldInputPort}/v1/internal/world-input/sources?limit=20`,
+      )) as {
+        items: Array<{ key: string; adapter: string }>;
+      };
+      const keys = new Set(sources.items.map((entry) => entry.key));
+      return (
+        keys.has("btc-price") &&
+        keys.has("fed-calendar") &&
+        keys.has("x-recent") &&
+        keys.has("reddit-economy") &&
+        keys.has("news-rss")
+      );
+    });
+
     await waitForCondition("world signals", async () => {
       const signals = (await waitForJson(`http://127.0.0.1:${worldInputPort}/v1/internal/world-signals`)) as {
-        items: Array<{ source_id: string }>;
+        items: Array<{ source_id: string; source_adapter: string }>;
       };
-      return signals.items.length >= 2;
+      const adapters = new Set(signals.items.map((entry) => entry.source_adapter));
+      return (
+        signals.items.length >= 5 &&
+        adapters.has("http_json_price") &&
+        adapters.has("http_json_calendar") &&
+        adapters.has("x_api_recent_search") &&
+        adapters.has("reddit_api_subreddit_new") &&
+        adapters.has("news_rss")
+      );
     });
 
     await waitForCondition("simulation run", async () => {

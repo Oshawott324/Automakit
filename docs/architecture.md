@@ -248,8 +248,8 @@ Responsibilities:
 Current implementation direction:
 
 - The current service is `services/world-input`.
-- It writes `world_signals` and `world_input_cursors` into Postgres.
-- The initial adapter surface is intentionally small and centered on machine-readable `http_json` sources.
+- It writes `world_signals` and manages `world_input_sources` / `world_input_runs` (with cursor state in source rows) in Postgres.
+- The current adapter surface includes machine-readable `http_json` sources plus `x_api_recent_search`, `reddit_api_subreddit_new`, and `news_rss`.
 - The target state is persisted source management in Postgres rather than env-only runtime feed configuration.
 
 ### 4.11 Simulation Orchestrator

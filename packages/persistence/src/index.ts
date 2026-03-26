@@ -99,6 +99,47 @@ export async function ensureCoreSchema(pool: Pool) {
       updated_at TIMESTAMPTZ NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS world_input_sources (
+      id TEXT PRIMARY KEY,
+      key TEXT NOT NULL UNIQUE,
+      adapter TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      status TEXT NOT NULL,
+      enabled BOOLEAN NOT NULL,
+      poll_interval_seconds INTEGER NOT NULL,
+      source_url TEXT,
+      trust_tier TEXT NOT NULL,
+      config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+      auth_secret_ref TEXT,
+      cursor_value TEXT,
+      last_polled_at TIMESTAMPTZ,
+      next_poll_at TIMESTAMPTZ NOT NULL,
+      backoff_until TIMESTAMPTZ,
+      failure_count INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_world_input_sources_due
+      ON world_input_sources (enabled, status, next_poll_at, backoff_until);
+
+    CREATE TABLE IF NOT EXISTS world_input_runs (
+      id TEXT PRIMARY KEY,
+      source_id TEXT NOT NULL REFERENCES world_input_sources(id) ON DELETE CASCADE,
+      started_at TIMESTAMPTZ NOT NULL,
+      ended_at TIMESTAMPTZ,
+      status TEXT NOT NULL,
+      fetched_count INTEGER NOT NULL DEFAULT 0,
+      accepted_count INTEGER NOT NULL DEFAULT 0,
+      error TEXT,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_world_input_runs_source_started
+      ON world_input_runs (source_id, started_at DESC);
+
     CREATE TABLE IF NOT EXISTS simulation_runs (
       id TEXT PRIMARY KEY,
       run_type TEXT NOT NULL,

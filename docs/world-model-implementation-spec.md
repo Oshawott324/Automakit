@@ -291,7 +291,8 @@ The persistence layer now uses an explicit multi-agent run model.
 ### 7.1 Keep
 
 - `world_signals`
-- `world_input_cursors`
+- `world_input_sources` (includes cursor and scheduling state)
+- `world_input_runs`
 
 ### 7.2 Add
 

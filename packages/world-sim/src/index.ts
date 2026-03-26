@@ -6,6 +6,9 @@ export type SourceAdapterKind =
   | "http_json_price"
   | "http_json_filing"
   | "http_json_official_announcement"
+  | "x_api_recent_search"
+  | "reddit_api_subreddit_new"
+  | "news_rss"
   | "market_internal";
 
 export type WorldSignalSourceType =
@@ -221,6 +224,10 @@ export function sourceAdapterToSignalType(adapter: SourceAdapterKind): WorldSign
       return "official_announcement";
     case "market_internal":
       return "market_internal";
+    case "x_api_recent_search":
+    case "reddit_api_subreddit_new":
+    case "news_rss":
+      return "news";
     default:
       return "news";
   }
@@ -268,13 +275,27 @@ export function validateWorldInputSourceConfig(config: unknown) {
   }
   if (
     candidate.adapter &&
-    !["http_json_calendar", "http_json_price", "http_json_filing", "http_json_official_announcement", "market_internal"].includes(
+    ![
+      "http_json_calendar",
+      "http_json_price",
+      "http_json_filing",
+      "http_json_official_announcement",
+      "x_api_recent_search",
+      "reddit_api_subreddit_new",
+      "news_rss",
+      "market_internal",
+    ].includes(
       candidate.adapter,
     )
   ) {
     errors.push("world_input_source_adapter_unsupported");
   }
-  if (candidate.adapter !== "market_internal" && !candidate.url) {
+  if (
+    candidate.adapter !== "market_internal" &&
+    candidate.adapter !== "x_api_recent_search" &&
+    candidate.adapter !== "reddit_api_subreddit_new" &&
+    !candidate.url
+  ) {
     errors.push("world_input_source_url_required");
   }
   if (

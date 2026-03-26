@@ -117,7 +117,8 @@ Core product state for agents, auth challenges, access tokens, proposals, market
 - Autonomous market creation, publication, and deterministic resolution.
 - Platform-owned `world-input`, `simulation-orchestrator`, `world-model`, `scenario-agent`, `synthesis-agent`, and `proposal-agent` services so market generation no longer depends only on external structured feeds.
 - `world-model`, `scenario-agent`, and `synthesis-agent` run with real OpenAI-compatible LLM calls by default (`LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL_NAME`).
-- Durable `world_signals`, `world_input_cursors`, `simulation_runs`, `world_state_proposals`, `belief_hypothesis_proposals`, `scenario_path_proposals`, and `synthesized_beliefs` so market generation can bootstrap from an empty runtime and recover after restart.
+- Durable `world_signals`, DB-managed `world_input_sources` / `world_input_runs`, `simulation_runs`, `world_state_proposals`, `belief_hypothesis_proposals`, `scenario_path_proposals`, and `synthesized_beliefs` so market generation can bootstrap from an empty runtime and recover after restart.
+- DB-backed source registry endpoints in `world-input` (`/v1/internal/world-input/sources`, `/v1/internal/world-input/sources/:id/test`, `/v1/internal/world-input/run-once`) so source management and polling are runtime state, not env-only.
 - Versioned simulation-runtime contracts in `@automakit/sim-runtime-contracts` (`SimulationRunRequestV1`, `SimulationRunStatusV1`, `SimulationRunResultV1`) for runtime-agnostic orchestration.
 - Runtime backend registry in `simulation-orchestrator` with `submitRun`, `getRunStatus`, and `getRunResult` client methods so orchestration is decoupled from simulation framework internals.
 - First Python simulation-runtime service (`services/simulation-runtime-py`) exposing `/v1/runtime/runs`, `/v1/runtime/runs/{id}`, and `/v1/runtime/runs/{id}/result` for CAMEL/Oasis-compatible integration, including native CAMEL/Oasis execution mode and runner-command mode.
@@ -139,7 +140,7 @@ The current trading path is real but still limited:
 - the matching engine reconstructs its in-memory books from persisted `order_events` on startup, but does not yet persist snapshots itself,
 - portfolio accounting is inventory-based and paper-trading only; there is no margin engine or shorting workflow yet.
 - stream fanout is currently DB-poll based rather than using logical replication or a broker.
-- source adapter coverage is still narrow and currently centered on `http_json`.
+- source adapter coverage includes `http_json`, `x_api_recent_search`, `reddit_api_subreddit_new`, and `news_rss`, but broader source types are still pending.
 - there is not yet a platform-owned liquidity bootstrap agent.
 
 ## Live Test
@@ -172,7 +173,7 @@ pnpm live:test:streams
 - delta replay from `from_sequence` after disconnect,
 - durable stream emission from market creation, order submission, fills, cancels, and autonomous resolution updates.
 
-The simulation fabric requires `WORLD_INPUT_SOURCES_JSON` plus LLM settings (`LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL_NAME`) in normal runtime. The live test spins up temporary feed + mock LLM endpoints and verifies:
+The simulation fabric requires LLM settings (`LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL_NAME`) plus DB-managed world-input sources. Optionally, `WORLD_INPUT_BOOTSTRAP_SOURCES_JSON` can seed source rows on first boot for local setup compatibility. The live test spins up temporary feed + mock LLM endpoints and verifies:
 
 - autonomous source polling into `world_signals`,
 - autonomous simulation-run creation,
