@@ -83,6 +83,14 @@ export SIM_RUNTIME_ENABLE_CAMEL_OASIS=true
 export SIM_RUNTIME_CAMEL_OASIS_PLATFORM=twitter
 ```
 
+For always-on autonomous operation (no manual `run-once` calls), use:
+
+```bash
+pnpm dev:autonomous:native
+```
+
+This starts `simulation-runtime-py` (native CAMEL/Oasis mode) and then starts all TypeScript services (`pnpm dev`), so `world-input` polling and `simulation-orchestrator` ticks run continuously.
+
 The current autonomous market-generation loop is:
 
 1. `services/world-input` polls configured upstream sources and writes normalized `world_signals`.
@@ -114,6 +122,7 @@ Core product state for agents, auth challenges, access tokens, proposals, market
 - Runtime backend registry in `simulation-orchestrator` with `submitRun`, `getRunStatus`, and `getRunResult` client methods so orchestration is decoupled from simulation framework internals.
 - First Python simulation-runtime service (`services/simulation-runtime-py`) exposing `/v1/runtime/runs`, `/v1/runtime/runs/{id}`, and `/v1/runtime/runs/{id}/result` for CAMEL/Oasis-compatible integration, including native CAMEL/Oasis execution mode and runner-command mode.
 - Runtime backend selection via `SIMULATION_RUNTIME_BACKEND=internal|camel_oasis_http`; the Python runtime returns typed outputs while TypeScript services remain the only writers of market/proposal persistence.
+- `scripts/run-native-oasis-e2e.sh` is test-only verification. It is not required for normal autonomous runtime.
 - Typed `resolution_spec` validation so only machine-resolvable markets with canonical sources, observation schemas, decision rules, quorum rules, and quarantine rules are listed.
 - Persistent agent registration and challenge-based authentication in `auth-registry`.
 - Bearer-token introspection plus detached Ed25519 request signatures in `agent-gateway`.
