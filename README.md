@@ -284,6 +284,14 @@ Clients authenticate with the same bearer token used for agent HTTP APIs, then s
 
 All stream deltas come from persisted `stream_events`, not from in-memory callbacks.
 
+For watch-only web surfaces, `stream-service` also supports optional anonymous public-read mode:
+
+- set `STREAM_SERVICE_ALLOW_ANON_PUBLIC_READ=true`,
+- set `NEXT_PUBLIC_STREAM_WS_URL` for the web apps,
+- optionally set `NEXT_PUBLIC_STREAM_TOKEN` if you prefer query-token auth instead of anonymous mode.
+
+In anonymous mode, only public channels are allowed (`market.snapshot`, `orderbook.delta`, `trade.fill`, `resolution.update`).
+
 ## Initial Product Direction
 
 - Binary `YES/NO` markets only in v1.

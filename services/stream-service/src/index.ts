@@ -125,6 +125,7 @@ type WsLike = {
 
 const port = Number(process.env.STREAM_SERVICE_PORT ?? 4007);
 const authRegistryUrl = process.env.AUTH_REGISTRY_URL ?? "http://localhost:4002";
+const allowAnonPublicRead = (process.env.STREAM_SERVICE_ALLOW_ANON_PUBLIC_READ ?? "false").toLowerCase() === "true";
 const app = Fastify({ logger: true });
 const pool = createDatabasePool();
 
@@ -444,7 +445,10 @@ function shouldDeliverEvent(
 
 app.get("/health", async () => ({ service: "stream-service", status: "ok" }));
 
-async function handleStreamSocket(socket: WsLike, request: { headers: Record<string, string | string[] | undefined> }) {
+async function handleStreamSocket(
+  socket: WsLike,
+  request: { headers: Record<string, string | string[] | undefined>; queryToken?: string | null },
+) {
   const rawAuthorization = request.headers.authorization;
   const authorization =
     typeof rawAuthorization === "string"
@@ -452,18 +456,26 @@ async function handleStreamSocket(socket: WsLike, request: { headers: Record<str
       : Array.isArray(rawAuthorization)
         ? rawAuthorization[0]
         : undefined;
-  if (!authorization?.startsWith("Bearer ")) {
+  const tokenFromHeader = authorization?.startsWith("Bearer ")
+    ? authorization.slice("Bearer ".length).trim()
+    : null;
+  const tokenFromQuery = request.queryToken?.trim() ? request.queryToken.trim() : null;
+  const token = tokenFromHeader ?? tokenFromQuery;
+
+  let agentId = "__anon_public__";
+  let isAnonymous = true;
+  if (token) {
+    const introspection = await introspectToken(token);
+    if (!introspection.active || !introspection.agent) {
+      socket.close(4401, "inactive_or_unknown_token");
+      return;
+    }
+    agentId = introspection.agent.id;
+    isAnonymous = false;
+  } else if (!allowAnonPublicRead) {
     socket.close(4401, "missing_or_invalid_authorization");
     return;
   }
-
-  const token = authorization.slice("Bearer ".length).trim();
-  const introspection = await introspectToken(token);
-  if (!introspection.active || !introspection.agent) {
-    socket.close(4401, "inactive_or_unknown_token");
-    return;
-  }
-  const agent = introspection.agent;
 
   let pollHandle: NodeJS.Timeout | null = null;
   let lastSequence = 0;
@@ -478,6 +490,18 @@ async function handleStreamSocket(socket: WsLike, request: { headers: Record<str
     }
 
     const channels = new Set(message.channels);
+    if (isAnonymous) {
+      const disallowed = [...channels].filter((channel) => channel === "order.update" || channel === "portfolio.update");
+      if (disallowed.length > 0) {
+        sendJson(socket, {
+          type: "error",
+          error: "anonymous_subscription_channel_unsupported",
+          channels: disallowed,
+        });
+        socket.close(4403, "anonymous_channel_not_allowed");
+        return;
+      }
+    }
     const baselineSequence = await getCurrentSequence();
     const useSnapshot = message.snapshot !== false;
     lastSequence = useSnapshot ? baselineSequence : Math.max(message.from_sequence ?? 0, 0);
@@ -513,21 +537,21 @@ async function handleStreamSocket(socket: WsLike, request: { headers: Record<str
       });
     }
 
-    if (useSnapshot && channels.has("order.update")) {
+    if (useSnapshot && channels.has("order.update") && !isAnonymous) {
       sendJson(socket, {
         type: "snapshot",
         channel: "order.update",
         sequence_id: baselineSequence,
-        payload: await getOrderSnapshots(agent.id, message.market_id),
+        payload: await getOrderSnapshots(agentId, message.market_id),
       });
     }
 
-    if (useSnapshot && channels.has("portfolio.update")) {
+    if (useSnapshot && channels.has("portfolio.update") && !isAnonymous) {
       sendJson(socket, {
         type: "snapshot",
         channel: "portfolio.update",
         sequence_id: baselineSequence,
-        payload: await getPortfolioSnapshot(agent.id),
+        payload: await getPortfolioSnapshot(agentId),
       });
     }
 
@@ -566,7 +590,7 @@ async function handleStreamSocket(socket: WsLike, request: { headers: Record<str
           continue;
         }
         lastSequence = Math.max(lastSequence, sequenceId);
-        if (!shouldDeliverEvent(row, agent.id, subscription)) {
+        if (!shouldDeliverEvent(row, agentId, subscription)) {
           continue;
         }
 
@@ -609,6 +633,7 @@ async function start() {
     wsServer.handleUpgrade(request, socket, head, (websocket) => {
       void handleStreamSocket(websocket as unknown as WsLike, {
         headers: request.headers as Record<string, string | string[] | undefined>,
+        queryToken: url.searchParams.get("token"),
       });
     });
   });
