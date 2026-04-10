@@ -12,6 +12,7 @@
   "dependencies": {
     "@automakit/persistence": "workspace:*",
     "@automakit/sdk-types": "workspace:*",
+    "@automakit/world-sim": "workspace:*",
     "fastify": "^5.3.2"
   }
 }

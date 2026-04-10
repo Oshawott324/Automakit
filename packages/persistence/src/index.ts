@@ -138,6 +138,11 @@ export async function ensureCoreSchema(pool: Pool) {
       signal_source_id TEXT,
       signal_source_type TEXT,
       status TEXT NOT NULL,
+      market_state TEXT NOT NULL DEFAULT 'market_candidate',
+      market_primitive_kind TEXT NOT NULL DEFAULT 'unsupported',
+      pricing_model_kind TEXT NOT NULL DEFAULT 'none',
+      trading_eligibility TEXT NOT NULL DEFAULT 'observe_only',
+      quality_gate_reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
       confidence_score DOUBLE PRECISION NOT NULL,
       observation_count INTEGER NOT NULL,
       autonomy_note TEXT NOT NULL,
@@ -603,6 +608,11 @@ export async function ensureCoreSchema(pool: Pool) {
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
     ALTER TABLE proposals ADD COLUMN IF NOT EXISTS resolution_spec JSONB NOT NULL DEFAULT '{}'::jsonb;
     ALTER TABLE proposals ADD COLUMN IF NOT EXISTS semantic_dedupe_key TEXT;
+    ALTER TABLE proposals ADD COLUMN IF NOT EXISTS market_state TEXT NOT NULL DEFAULT 'market_candidate';
+    ALTER TABLE proposals ADD COLUMN IF NOT EXISTS market_primitive_kind TEXT NOT NULL DEFAULT 'unsupported';
+    ALTER TABLE proposals ADD COLUMN IF NOT EXISTS pricing_model_kind TEXT NOT NULL DEFAULT 'none';
+    ALTER TABLE proposals ADD COLUMN IF NOT EXISTS trading_eligibility TEXT NOT NULL DEFAULT 'observe_only';
+    ALTER TABLE proposals ADD COLUMN IF NOT EXISTS quality_gate_reasons JSONB NOT NULL DEFAULT '[]'::jsonb;
     ALTER TABLE markets ADD COLUMN IF NOT EXISTS resolution_spec JSONB NOT NULL DEFAULT '{}'::jsonb;
     ALTER TABLE observations ADD COLUMN IF NOT EXISTS parser_version TEXT NOT NULL DEFAULT 'resolution-runtime@1';
     ALTER TABLE simulation_runs ADD COLUMN IF NOT EXISTS trigger_dedupe_key TEXT;

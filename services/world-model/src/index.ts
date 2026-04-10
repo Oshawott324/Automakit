@@ -154,6 +154,11 @@ type WorldModelLlmResponse = {
   }>;
 };
 
+type GameParticipants = {
+  homeTeam: string;
+  awayTeam: string;
+};
+
 const port = Number(process.env.WORLD_MODEL_PORT ?? 4011);
 const intervalMs = Number(process.env.WORLD_MODEL_INTERVAL_MS ?? 1000);
 const batchSize = Number(process.env.WORLD_MODEL_BATCH_SIZE ?? 10);
@@ -431,6 +436,11 @@ function categoryForSignal(signal: WorldSignal) {
 }
 
 function subjectForSignal(signal: WorldSignal) {
+  const participants = sportsGameParticipantsForSignal(signal);
+  if (participants) {
+    return `${participants.awayTeam} at ${participants.homeTeam}`;
+  }
+
   return String(
     signal.payload.asset_symbol ??
       signal.payload.institution ??
@@ -440,6 +450,43 @@ function subjectForSignal(signal: WorldSignal) {
   );
 }
 
+function readPayloadString(payload: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
+function sportsGameParticipantsForSignal(signal: WorldSignal): GameParticipants | null {
+  if (categoryForSignal(signal) !== "sports") {
+    return null;
+  }
+
+  const homeTeam = readPayloadString(signal.payload, ["home_team", "homeTeam", "home", "host_team"]);
+  const awayTeam = readPayloadString(signal.payload, ["away_team", "awayTeam", "away", "visitor_team"]);
+  if (!homeTeam || !awayTeam || homeTeam === awayTeam) {
+    return null;
+  }
+
+  return { homeTeam, awayTeam };
+}
+
+function sportsGameCloseTimeForSignal(signal: WorldSignal) {
+  const candidates = [
+    readPayloadString(signal.payload, ["scheduled_at", "start_time", "game_time", "commence_time"]),
+    signal.effective_at ?? null,
+  ];
+  for (const candidate of candidates) {
+    if (candidate && !Number.isNaN(Date.parse(candidate))) {
+      return new Date(candidate).toISOString();
+    }
+  }
+  return targetTimeForSignal(signal);
+}
+
 function predicateForSignal(signal: WorldSignal, kind: ResolutionSpec["kind"], threshold?: number, direction?: string) {
   if (kind === "price_threshold") {
     return `${subjectForSignal(signal)} spot price >= ${threshold ?? 0} by target date`;
@@ -447,6 +494,12 @@ function predicateForSignal(signal: WorldSignal, kind: ResolutionSpec["kind"], t
   if (kind === "rate_decision") {
     const institution = String(signal.payload.institution ?? subjectForSignal(signal) ?? "Central bank");
     return `${institution} will ${direction ?? "hold"} rates by target date`;
+  }
+  if (kind === "game_result") {
+    const participants = sportsGameParticipantsForSignal(signal);
+    return participants
+      ? `${participants.homeTeam} will defeat ${participants.awayTeam}`
+      : `${subjectForSignal(signal)} winner will match the selected side`;
   }
   const subject = String(signal.payload.event_name ?? signal.payload.event ?? signal.title);
   const publishabilityClass = publishabilityClassForSignal(signal);
@@ -472,8 +525,9 @@ function fieldsForSignal(
   threshold?: number,
   direction?: "cut" | "hold" | "hike",
 ) {
+  const participants = kind === "game_result" ? sportsGameParticipantsForSignal(signal) : null;
   return {
-    subject: subjectForSignal(signal),
+    subject: participants ? participants.homeTeam : subjectForSignal(signal),
     category: categoryForSignal(signal),
     predicate: predicateForSignal(signal, kind, threshold, direction),
   };
@@ -887,6 +941,57 @@ function buildRateDecisionSpec(signal: WorldSignal): ResolutionSpec | null {
   };
 }
 
+function buildGameResultSpec(signal: WorldSignal): ResolutionSpec | null {
+  const participants = sportsGameParticipantsForSignal(signal);
+  if (!participants) {
+    return null;
+  }
+
+  const canonicalSourceUrl =
+    typeof signal.payload.canonical_source_url === "string" ? signal.payload.canonical_source_url : signal.source_url;
+  const winnerPath =
+    typeof signal.payload.observation_winner_path === "string" && signal.payload.observation_winner_path.trim().length > 0
+      ? signal.payload.observation_winner_path.trim()
+      : "winner";
+
+  if (!canonicalSourceUrl) {
+    return null;
+  }
+
+  return {
+    kind: "game_result",
+    source: {
+      adapter: "http_json",
+      canonical_url: canonicalSourceUrl,
+      allowed_domains: normalizeAllowedDomainsFromUrl(canonicalSourceUrl),
+      extraction_mode: readResolutionExtractionMode(signal),
+    },
+    observation_schema: {
+      type: "object",
+      fields: {
+        winner: { type: "string", path: winnerPath },
+        observed_at: { type: "string", path: "observed_at", required: false },
+      },
+    },
+    decision_rule: {
+      kind: "game_result",
+      winner_field: "winner",
+      expected_winner: participants.homeTeam,
+    },
+    quorum_rule: {
+      min_observations: 2,
+      min_distinct_collectors: 2,
+      agreement: "all",
+    },
+    quarantine_rule: {
+      on_source_fetch_failure: true,
+      on_schema_validation_failure: true,
+      on_observation_conflict: true,
+      max_observation_age_seconds: 6 * 60 * 60,
+    },
+  };
+}
+
 function buildEventOccurrenceSpec(signal: WorldSignal): ResolutionSpec | null {
   const canonicalSourceUrl =
     typeof signal.payload.canonical_source_url === "string" ? signal.payload.canonical_source_url : signal.source_url;
@@ -941,10 +1046,11 @@ function buildWorldModelLlmSystemPrompt() {
     "Generate one world_state object and a hypotheses array.",
     "Each hypothesis must map to one input signal via source_signal_id.",
     "Treat event cases as the primary unit of thought, not isolated raw signals.",
-    "Use only these hypothesis kinds: price_threshold, rate_decision, event_occurrence.",
+    "Use only these hypothesis kinds: price_threshold, rate_decision, event_occurrence, game_result.",
     "Set confidence_score in [0,1].",
     "Every hypothesis must include source_signal_id, hypothesis_kind, subject, predicate, target_time, reasoning_summary, and confidence_score.",
     "For price_threshold hypotheses, always include price_threshold.operator using gt/gte/lt/lte and price_threshold.threshold.",
+    "For scheduled sports fixtures with home_team and away_team payload fields, prefer a game_result hypothesis over a generic event_occurrence.",
     "Prefer one distinct publishable belief per event case when possible.",
     "Prefer precursor and catalyst evidence over fact-confirmation headlines when forming forecast beliefs.",
     "Use fact signals mainly to ground the world state, not to restate events that are already complete.",
@@ -1046,7 +1152,9 @@ async function generateWithLlm(
     }
 
     const normalizedKind =
-      signal.source_type === "price_feed"
+      sportsGameParticipantsForSignal(signal)
+        ? "game_result"
+        : signal.source_type === "price_feed"
         ? "price_threshold"
         : signal.source_type === "economic_calendar"
           ? "rate_decision"
@@ -1075,6 +1183,8 @@ async function generateWithLlm(
       resolvedDirection =
         directionValue === "cut" || directionValue === "hold" || directionValue === "hike" ? directionValue : "hold";
       suggestedResolutionSpec = buildRateDecisionSpec(signal) ?? undefined;
+    } else if (normalizedKind === "game_result") {
+      suggestedResolutionSpec = buildGameResultSpec(signal) ?? undefined;
     } else if (normalizedKind === "event_occurrence") {
       suggestedResolutionSpec = buildEventOccurrenceSpec(signal) ?? undefined;
     }
@@ -1088,7 +1198,9 @@ async function generateWithLlm(
     const targetTime =
       typeof item.target_time === "string" && item.target_time.trim().length > 0
         ? item.target_time
-        : targetTimeForSignal(signal);
+        : normalizedKind === "game_result"
+          ? sportsGameCloseTimeForSignal(signal)
+          : targetTimeForSignal(signal);
     const category = signalFields.category;
     const predicate = signalFields.predicate;
     const confidenceScore = clamp(Number(item.confidence_score));

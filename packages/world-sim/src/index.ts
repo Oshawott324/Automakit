@@ -189,7 +189,7 @@ export type BeliefHypothesisProposal = {
   created_at: string;
 };
 
-export type SynthesizedBeliefStatus = "new" | "ambiguous" | "proposed" | "suppressed";
+export type SynthesizedBeliefStatus = "new" | "ambiguous" | "watch_case" | "proposed" | "suppressed";
 
 export type SynthesizedBelief = {
   id: string;
@@ -216,6 +216,44 @@ export type ProposalCandidate = {
   resolution_spec: ResolutionSpec;
   dedupe_key: string;
   source_belief_id: string;
+  market_state: MarketReadinessState;
+  market_primitive_kind: MarketPrimitiveKind;
+  pricing_model_kind: PricingModelKind;
+  trading_eligibility: TradingEligibility;
+  quality_gate_reasons: string[];
+};
+
+export type MarketPrimitiveKind =
+  | "scheduled_competition"
+  | "scheduled_numeric_release"
+  | "scheduled_decision"
+  | "threshold_observation"
+  | "authoritative_occurrence_claim"
+  | "unsupported";
+
+export type MarketReadinessState = "watch_case" | "market_candidate" | "tradable_market";
+export type PricingModelKind =
+  | "sports_pre_match"
+  | "numeric_release_consensus"
+  | "scheduled_decision_consensus"
+  | "liquid_threshold"
+  | "occurrence_source_quality"
+  | "none";
+export type TradingEligibility = "observe_only" | "tradable";
+
+export type MarketPrimitiveAssessment = {
+  market_state: MarketReadinessState;
+  market_primitive_kind: MarketPrimitiveKind;
+  pricing_model_kind: PricingModelKind;
+  trading_eligibility: TradingEligibility;
+  quality_gate_reasons: string[];
+};
+
+export type MarketPrimitiveAssessmentInput = {
+  title?: string;
+  category?: string;
+  signal_source_type?: "calendar" | "news" | "agent";
+  resolution_spec?: ResolutionSpec | null;
 };
 
 export function buildDedupeKey(value: unknown) {
@@ -477,7 +515,133 @@ function isResolutionKind(value: unknown): value is ResolutionKind {
   return (
     value === "price_threshold" ||
     value === "rate_decision" ||
-    value === "event_occurrence"
+    value === "event_occurrence" ||
+    value === "game_result"
+  );
+}
+
+function normalizePrimitiveCategory(value: unknown) {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+function hostForResolutionSpec(spec: ResolutionSpec) {
+  try {
+    const host = new URL(spec.source.canonical_url).hostname.toLowerCase();
+    return host.startsWith("www.") ? host.slice(4) : host;
+  } catch {
+    return "";
+  }
+}
+
+function sourceHasDomain(spec: ResolutionSpec, domains: string[]) {
+  const host = hostForResolutionSpec(spec);
+  if (!host) {
+    return false;
+  }
+  return domains.some((domain) => host === domain || host.endsWith(`.${domain}`));
+}
+
+function basePrimitiveAssessment(
+  marketPrimitiveKind: MarketPrimitiveKind,
+  pricingModelKind: PricingModelKind,
+  reasons: string[],
+  options: {
+    market_state?: MarketReadinessState;
+    trading_eligibility?: TradingEligibility;
+  } = {},
+): MarketPrimitiveAssessment {
+  return {
+    market_state: options.market_state ?? "market_candidate",
+    market_primitive_kind: marketPrimitiveKind,
+    pricing_model_kind: pricingModelKind,
+    trading_eligibility: options.trading_eligibility ?? "observe_only",
+    quality_gate_reasons: reasons,
+  };
+}
+
+export function assessMarketPrimitive(input: MarketPrimitiveAssessmentInput): MarketPrimitiveAssessment {
+  const category = normalizePrimitiveCategory(input.category);
+  const spec = input.resolution_spec;
+  if (!spec) {
+    return basePrimitiveAssessment("unsupported", "none", ["missing_resolution_spec"], {
+      market_state: "watch_case",
+    });
+  }
+
+  if (spec.kind === "game_result") {
+    return basePrimitiveAssessment(
+      "scheduled_competition",
+      "sports_pre_match",
+      ["scheduled_competition_market_candidate", "requires_sports_pricing_model_before_trading"],
+    );
+  }
+
+  if (spec.kind === "rate_decision") {
+    return basePrimitiveAssessment(
+      "scheduled_decision",
+      "scheduled_decision_consensus",
+      ["scheduled_decision_market_candidate", "requires_decision_pricing_model_before_trading"],
+    );
+  }
+
+  if (spec.kind === "price_threshold") {
+    if (category === "economy" || category === "macro") {
+      return basePrimitiveAssessment(
+        "scheduled_numeric_release",
+        "numeric_release_consensus",
+        ["scheduled_numeric_release_market_candidate", "requires_numeric_release_pricing_model_before_trading"],
+      );
+    }
+
+    const liquidSource = sourceHasDomain(spec, [
+      "cmegroup.com",
+      "coinbase.com",
+      "kraken.com",
+      "coingecko.com",
+      "binance.com",
+      "stooq.com",
+      "frankfurter.app",
+    ]);
+    return basePrimitiveAssessment(
+      "threshold_observation",
+      "liquid_threshold",
+      liquidSource
+        ? ["liquid_threshold_trading_gate_passed"]
+        : ["threshold_market_candidate", "requires_liquid_source_before_trading"],
+      {
+        market_state: liquidSource ? "tradable_market" : "market_candidate",
+        trading_eligibility: liquidSource ? "tradable" : "observe_only",
+      },
+    );
+  }
+
+  if (spec.kind === "event_occurrence") {
+    if (category === "sports") {
+      return basePrimitiveAssessment(
+        "scheduled_competition",
+        "sports_pre_match",
+        [
+          "sports_occurrence_is_watch_case_without_game_result_winner_contract",
+          "requires_game_result_resolution_spec",
+        ],
+        { market_state: "watch_case" },
+      );
+    }
+
+    if (category === "weather" || category === "business" || category === "world" || category === "politics") {
+      return basePrimitiveAssessment(
+        "authoritative_occurrence_claim",
+        "occurrence_source_quality",
+        ["authoritative_occurrence_market_candidate", "requires_occurrence_pricing_model_before_trading"],
+      );
+    }
+  }
+
+  return basePrimitiveAssessment(
+    "unsupported",
+    "none",
+    ["unsupported_resolution_primitive"],
+    { market_state: "watch_case" },
   );
 }
 

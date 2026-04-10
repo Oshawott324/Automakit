@@ -6,6 +6,13 @@ import {
   type ResolutionSpec,
   validateResolutionSpec,
 } from "@automakit/sdk-types";
+import {
+  assessMarketPrimitive,
+  type MarketPrimitiveKind,
+  type MarketReadinessState,
+  type PricingModelKind,
+  type TradingEligibility,
+} from "@automakit/world-sim";
 
 type Proposal = {
   id: string;
@@ -24,6 +31,11 @@ type Proposal = {
   signal_source_id?: string;
   signal_source_type?: "calendar" | "news" | "agent";
   status: "queued" | "published" | "suppressed";
+  market_state: MarketReadinessState;
+  market_primitive_kind: MarketPrimitiveKind;
+  pricing_model_kind: PricingModelKind;
+  trading_eligibility: TradingEligibility;
+  quality_gate_reasons: string[];
   confidence_score: number;
   observation_count: number;
   autonomy_note: string;
@@ -48,6 +60,11 @@ type ProposalRow = {
   signal_source_id: string | null;
   signal_source_type: Proposal["signal_source_type"] | null;
   status: Proposal["status"];
+  market_state: MarketReadinessState | null;
+  market_primitive_kind: MarketPrimitiveKind | null;
+  pricing_model_kind: PricingModelKind | null;
+  trading_eligibility: TradingEligibility | null;
+  quality_gate_reasons: unknown;
   confidence_score: number;
   observation_count: number;
   autonomy_note: string;
@@ -66,6 +83,14 @@ const semanticPriceThresholdTolerance = Math.max(0.001, Number(process.env.PROPO
 const semanticTitleSimilarityThreshold = Math.max(0.2, Math.min(1, Number(process.env.PROPOSAL_SEMANTIC_TITLE_SIMILARITY ?? 0.45)));
 
 function mapProposalRow(row: ProposalRow): Proposal {
+  const resolutionSpec = parseJsonField<ResolutionSpec>(row.resolution_spec);
+  const primitiveAssessment = assessMarketPrimitive({
+    title: row.title,
+    category: row.category,
+    signal_source_type: row.signal_source_type ?? undefined,
+    resolution_spec: resolutionSpec,
+  });
+
   return {
     id: row.id,
     proposer_agent_id: row.proposer_agent_id,
@@ -73,7 +98,7 @@ function mapProposalRow(row: ProposalRow): Proposal {
     category: row.category,
     close_time: toIsoTimestamp(row.close_time),
     resolution_criteria: row.resolution_criteria,
-    resolution_spec: parseJsonField<ResolutionSpec>(row.resolution_spec),
+    resolution_spec: resolutionSpec,
     source_of_truth_url: row.source_of_truth_url,
     resolution_kind: row.resolution_kind,
     resolution_metadata: parseJsonField<ResolutionSpec["decision_rule"]>(row.resolution_metadata),
@@ -83,6 +108,14 @@ function mapProposalRow(row: ProposalRow): Proposal {
     signal_source_id: row.signal_source_id ?? undefined,
     signal_source_type: row.signal_source_type ?? undefined,
     status: row.status,
+    market_state: row.market_state ?? primitiveAssessment.market_state,
+    market_primitive_kind: row.market_primitive_kind ?? primitiveAssessment.market_primitive_kind,
+    pricing_model_kind: row.pricing_model_kind ?? primitiveAssessment.pricing_model_kind,
+    trading_eligibility: row.trading_eligibility ?? primitiveAssessment.trading_eligibility,
+    quality_gate_reasons:
+      row.quality_gate_reasons === null || row.quality_gate_reasons === undefined
+        ? primitiveAssessment.quality_gate_reasons
+        : parseJsonField<string[]>(row.quality_gate_reasons),
     confidence_score: Number(row.confidence_score),
     observation_count: Number(row.observation_count),
     autonomy_note: row.autonomy_note,
@@ -210,6 +243,16 @@ function buildSemanticDedupeKey(input: {
     ].join(":");
   }
 
+  if (input.resolution_spec.kind === "game_result") {
+    return [
+      "game_result",
+      category,
+      canonicalUrl,
+      normalizeText(input.resolution_spec.decision_rule.expected_winner),
+      closeBucket,
+    ].join(":");
+  }
+
   return [
     "event_occurrence",
     category,
@@ -261,6 +304,16 @@ function isSemanticNearDuplicate(existing: Proposal, incoming: {
     return (
       existingSource === incomingSource &&
       existing.resolution_spec.decision_rule.direction === incoming.resolution_spec.decision_rule.direction
+    );
+  }
+
+  if (incoming.resolution_spec.kind === "game_result" && existing.resolution_spec.kind === "game_result") {
+    const existingSource = normalizeCanonicalUrl(existing.resolution_spec.source.canonical_url);
+    const incomingSource = normalizeCanonicalUrl(incoming.resolution_spec.source.canonical_url);
+    return (
+      existingSource === incomingSource &&
+      normalizeText(existing.resolution_spec.decision_rule.expected_winner) ===
+        normalizeText(incoming.resolution_spec.decision_rule.expected_winner)
     );
   }
 
@@ -329,11 +382,16 @@ async function saveProposal(proposal: Proposal) {
         signal_source_id = $14,
         signal_source_type = $15,
         status = $16,
-        confidence_score = $17,
-        observation_count = $18,
-        autonomy_note = $19,
-        linked_market_id = $20,
-        created_at = $21::timestamptz
+        market_state = $17,
+        market_primitive_kind = $18,
+        pricing_model_kind = $19,
+        trading_eligibility = $20,
+        quality_gate_reasons = $21::jsonb,
+        confidence_score = $22,
+        observation_count = $23,
+        autonomy_note = $24,
+        linked_market_id = $25,
+        created_at = $26::timestamptz
       WHERE id = $1
       RETURNING *
     `,
@@ -354,6 +412,11 @@ async function saveProposal(proposal: Proposal) {
       proposal.signal_source_id ?? null,
       proposal.signal_source_type ?? null,
       proposal.status,
+      proposal.market_state,
+      proposal.market_primitive_kind,
+      proposal.pricing_model_kind,
+      proposal.trading_eligibility,
+      JSON.stringify(proposal.quality_gate_reasons),
       proposal.confidence_score,
       proposal.observation_count,
       proposal.autonomy_note,
@@ -385,6 +448,11 @@ async function saveProposal(proposal: Proposal) {
         signal_source_id,
         signal_source_type,
         status,
+        market_state,
+        market_primitive_kind,
+        pricing_model_kind,
+        trading_eligibility,
+        quality_gate_reasons,
         confidence_score,
         observation_count,
         autonomy_note,
@@ -392,7 +460,7 @@ async function saveProposal(proposal: Proposal) {
         created_at
       )
       VALUES (
-        $1, $2, $3, $4, $5::timestamptz, $6, $7::jsonb, $8, $9, $10::jsonb, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21::timestamptz
+        $1, $2, $3, $4, $5::timestamptz, $6, $7::jsonb, $8, $9, $10::jsonb, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21::jsonb, $22, $23, $24, $25, $26::timestamptz
       )
       ON CONFLICT (semantic_dedupe_key) WHERE semantic_dedupe_key IS NOT NULL DO UPDATE SET
         proposer_agent_id = EXCLUDED.proposer_agent_id,
@@ -408,6 +476,11 @@ async function saveProposal(proposal: Proposal) {
         origin = EXCLUDED.origin,
         signal_source_id = EXCLUDED.signal_source_id,
         signal_source_type = EXCLUDED.signal_source_type,
+        market_state = EXCLUDED.market_state,
+        market_primitive_kind = EXCLUDED.market_primitive_kind,
+        pricing_model_kind = EXCLUDED.pricing_model_kind,
+        trading_eligibility = EXCLUDED.trading_eligibility,
+        quality_gate_reasons = EXCLUDED.quality_gate_reasons,
         status = CASE
           WHEN proposals.status = 'published' THEN proposals.status
           WHEN proposals.linked_market_id IS NOT NULL THEN 'published'
@@ -437,6 +510,11 @@ async function saveProposal(proposal: Proposal) {
       proposal.signal_source_id ?? null,
       proposal.signal_source_type ?? null,
       proposal.status,
+      proposal.market_state,
+      proposal.market_primitive_kind,
+      proposal.pricing_model_kind,
+      proposal.trading_eligibility,
+      JSON.stringify(proposal.quality_gate_reasons),
       proposal.confidence_score,
       proposal.observation_count,
       proposal.autonomy_note,
@@ -455,6 +533,9 @@ function scoreProposal(input: {
   title?: string;
   signal_source_type?: "calendar" | "news" | "agent";
   resolution_spec?: ResolutionSpec;
+  market_state?: MarketReadinessState;
+  market_primitive_kind?: MarketPrimitiveKind;
+  trading_eligibility?: TradingEligibility;
 }): { confidenceScore: number; status: Proposal["status"]; autonomyNote: string } {
   if (!input.title || !input.resolution_spec) {
     return {
@@ -470,6 +551,14 @@ function scoreProposal(input: {
       confidenceScore: 0,
       status: "suppressed" as const,
       autonomyNote: `Suppressed because resolution specification is invalid: ${validation.errors.join(", ")}`,
+    };
+  }
+
+  if (input.market_state === "watch_case") {
+    return {
+      confidenceScore: 0,
+      status: "suppressed" as const,
+      autonomyNote: "Kept as watch case because it does not satisfy a supported market primitive.",
     };
   }
 
@@ -499,6 +588,15 @@ function scoreProposal(input: {
   }
   if (input.resolution_spec.kind === "event_occurrence") {
     confidenceScore += 0.06;
+  }
+  if (input.resolution_spec.kind === "game_result") {
+    confidenceScore += 0.14;
+  }
+  if (input.market_primitive_kind === "scheduled_competition") {
+    confidenceScore += 0.06;
+  }
+  if (input.trading_eligibility === "observe_only") {
+    confidenceScore -= 0.04;
   }
   if (extractionMode === "agent_extract") {
     confidenceScore += 0.1;
@@ -624,6 +722,11 @@ app.post("/v1/market-proposals", async (request, reply) => {
     resolution_criteria?: string;
     resolution_spec?: ResolutionSpec;
     dedupe_key?: string;
+    market_state?: MarketReadinessState;
+    market_primitive_kind?: MarketPrimitiveKind;
+    pricing_model_kind?: PricingModelKind;
+    trading_eligibility?: TradingEligibility;
+    quality_gate_reasons?: string[];
     origin?: "agent" | "automation";
     signal_source_id?: string;
     signal_source_type?: "calendar" | "news" | "agent";
@@ -638,6 +741,12 @@ app.post("/v1/market-proposals", async (request, reply) => {
   const resolutionSpecValidation = body.resolution_spec ? validateResolutionSpec(body.resolution_spec) : null;
   const resolutionSpec =
     resolutionSpecValidation && resolutionSpecValidation.ok ? resolutionSpecValidation.spec : null;
+  const primitiveAssessment = assessMarketPrimitive({
+    title: normalizedTitle,
+    category: normalizedCategory,
+    signal_source_type: body.signal_source_type,
+    resolution_spec: resolutionSpec,
+  });
   const semanticDedupeKey = resolutionSpec
     ? buildSemanticDedupeKey({
         title: normalizedTitle,
@@ -694,7 +803,13 @@ app.post("/v1/market-proposals", async (request, reply) => {
     }
   }
 
-  const decision = scoreProposal(body);
+  const decision = scoreProposal({
+    ...body,
+    resolution_spec: resolutionSpec ?? undefined,
+    market_state: primitiveAssessment.market_state,
+    market_primitive_kind: primitiveAssessment.market_primitive_kind,
+    trading_eligibility: primitiveAssessment.trading_eligibility,
+  });
 
   const proposal: Proposal = {
     id: randomUUID(),
@@ -755,6 +870,11 @@ app.post("/v1/market-proposals", async (request, reply) => {
     signal_source_id: body.signal_source_id,
     signal_source_type: body.signal_source_type,
     status: decision.status,
+    market_state: primitiveAssessment.market_state,
+    market_primitive_kind: primitiveAssessment.market_primitive_kind,
+    pricing_model_kind: primitiveAssessment.pricing_model_kind,
+    trading_eligibility: primitiveAssessment.trading_eligibility,
+    quality_gate_reasons: primitiveAssessment.quality_gate_reasons,
     confidence_score: decision.confidenceScore,
     observation_count: 1,
     autonomy_note: decision.autonomyNote,

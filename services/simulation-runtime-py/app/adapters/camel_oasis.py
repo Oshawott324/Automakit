@@ -799,6 +799,15 @@ class CamelOasisAdapter:
                     direction = "hold"
                 predicate = f"{institution} will {direction} rates by target date"
                 resolution_spec = self._build_rate_decision_spec(signal, direction)
+            elif category == "sports" and self._sports_game_participants(signal) is not None:
+                participants = self._sports_game_participants(signal) or {}
+                home_team = str(participants.get("home_team") or subject)
+                away_team = str(participants.get("away_team") or "opponent")
+                kind = "game_result"
+                subject = home_team
+                target_time = self._sports_game_close_time(signal)
+                predicate = f"{home_team} will defeat {away_team}"
+                resolution_spec = self._build_game_result_spec(signal, home_team)
             elif "price_feed" in source_types or source_kind == "price_feed":
                 kind = "price_threshold"
                 try:
@@ -874,6 +883,32 @@ class CamelOasisAdapter:
             except Exception:
                 pass
         return (utc_now() + timedelta(days=3)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    def _payload_string(self, signal: Any, keys: List[str]) -> Optional[str]:
+        for key in keys:
+            value = signal.payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    def _sports_game_participants(self, signal: Any) -> Optional[Dict[str, str]]:
+        home_team = self._payload_string(signal, ["home_team", "homeTeam", "home", "host_team"])
+        away_team = self._payload_string(signal, ["away_team", "awayTeam", "away", "visitor_team"])
+        if not home_team or not away_team or home_team == away_team:
+            return None
+        return {"home_team": home_team, "away_team": away_team}
+
+    def _sports_game_close_time(self, signal: Any) -> str:
+        scheduled_at = self._payload_string(signal, ["scheduled_at", "start_time", "game_time", "commence_time"])
+        for candidate in [scheduled_at, signal.effective_at]:
+            if not candidate:
+                continue
+            try:
+                parsed = datetime.fromisoformat(str(candidate).replace("Z", "+00:00"))
+                return parsed.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            except Exception:
+                continue
+        return self._target_time_for(signal.effective_at)
 
     def _category_for_candidate(
         self,
@@ -1004,6 +1039,39 @@ class CamelOasisAdapter:
                 "on_schema_validation_failure": True,
                 "on_observation_conflict": True,
                 "max_observation_age_seconds": 3600,
+            },
+        }
+
+    def _build_game_result_spec(self, signal: Any, expected_winner: str) -> Optional[Dict[str, Any]]:
+        canonical_url = str(signal.payload.get("canonical_source_url") or signal.source_url or "").strip()
+        winner_path = str(signal.payload.get("observation_winner_path") or "winner").strip() or "winner"
+        if not canonical_url or not expected_winner.strip():
+            return None
+        return {
+            "kind": "game_result",
+            "source": self._build_resolution_source_spec(signal, canonical_url),
+            "observation_schema": {
+                "type": "object",
+                "fields": {
+                    "winner": {"type": "string", "path": winner_path},
+                    "observed_at": {"type": "string", "path": "observed_at", "required": False},
+                },
+            },
+            "decision_rule": {
+                "kind": "game_result",
+                "winner_field": "winner",
+                "expected_winner": expected_winner,
+            },
+            "quorum_rule": {
+                "min_observations": 2,
+                "min_distinct_collectors": 2,
+                "agreement": "all",
+            },
+            "quarantine_rule": {
+                "on_source_fetch_failure": True,
+                "on_schema_validation_failure": True,
+                "on_observation_conflict": True,
+                "max_observation_age_seconds": 21600,
             },
         }
 

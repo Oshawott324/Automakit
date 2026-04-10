@@ -24,6 +24,9 @@ type MarketSummary = {
 type ProposalRecord = {
   id: string;
   status: "queued" | "published" | "suppressed";
+  market_state?: "watch_case" | "market_candidate" | "tradable_market";
+  market_primitive_kind?: string;
+  trading_eligibility?: "observe_only" | "tradable";
   signal_source_id?: string;
   linked_market_id?: string;
 };
@@ -51,6 +54,11 @@ const intervalMs = Number(process.env.TRADE_SIMULATOR_INTERVAL_MS ?? 3000);
 const maxMarketsPerTick = Math.max(1, Math.min(10, Number(process.env.TRADE_SIMULATOR_MAX_MARKETS_PER_TICK ?? 3)));
 const tradeSize = Math.max(1, Number(process.env.TRADE_SIMULATOR_TRADE_SIZE ?? 8));
 const mintSize = Math.max(tradeSize * 4, Number(process.env.TRADE_SIMULATOR_MINT_SIZE ?? 120));
+const minTradeEdge = Math.max(0, Math.min(0.5, Number(process.env.TRADE_SIMULATOR_MIN_EDGE ?? 0.08)));
+const confidenceUncertaintyPenalty = Math.max(
+  0,
+  Math.min(0.4, Number(process.env.TRADE_SIMULATOR_CONFIDENCE_UNCERTAINTY_PENALTY ?? 0.04)),
+);
 
 const authRegistryUrl = process.env.AUTH_REGISTRY_URL ?? "http://127.0.0.1:4002";
 const marketServiceUrl = process.env.MARKET_SERVICE_URL ?? "http://127.0.0.1:4003";
@@ -294,13 +302,23 @@ function buildTradePlan(
   if (!proposal || !belief || !belief.hypothesis.machine_resolvable) {
     return null;
   }
+  if (proposal.market_state !== "tradable_market" || proposal.trading_eligibility !== "tradable") {
+    return null;
+  }
+  if (market.last_traded_price_yes === null) {
+    return null;
+  }
 
   const confidenceYes = clamp(toNumber(belief.hypothesis.confidence_score, belief.confidence_score));
   const outcome: "YES" | "NO" = confidenceYes >= 0.5 ? "YES" : "NO";
   const conviction = Math.abs(confidenceYes - 0.5) * 2;
-  const marketYes = clamp(market.last_traded_price_yes ?? confidenceYes);
+  const marketYes = clamp(market.last_traded_price_yes);
   const fairOutcome = outcome === "YES" ? confidenceYes : 1 - confidenceYes;
   const marketOutcome = outcome === "YES" ? marketYes : 1 - marketYes;
+  const edge = fairOutcome - marketOutcome - confidenceUncertaintyPenalty;
+  if (edge < minTradeEdge) {
+    return null;
+  }
   const price = roundPrice(clamp(fairOutcome * 0.7 + marketOutcome * 0.3));
   const size = Math.max(1, Math.round(tradeSize * (0.6 + conviction * 1.4)));
 

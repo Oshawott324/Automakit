@@ -212,6 +212,9 @@ importers:
       '@automakit/sdk-types':
         specifier: workspace:*
         version: link:../../packages/sdk-types
+      '@automakit/world-sim':
+        specifier: workspace:*
+        version: link:../../packages/world-sim
       fastify:
         specifier: ^5.3.2
         version: 5.8.2

@@ -3,6 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createDatabasePool, ensureCoreSchema, parseJsonField, toIsoTimestamp } from "@automakit/persistence";
 import type { ResolutionSpec } from "@automakit/sdk-types";
 import {
+  assessMarketPrimitive,
   normalizeAllowedDomainsFromUrl,
   type BeliefHypothesisProposal,
   type ProposalCandidate,
@@ -116,6 +117,28 @@ function operatorPhrase(operator: "gt" | "gte" | "lt" | "lte") {
   }
 }
 
+type ProposalCandidateBase = Omit<
+  ProposalCandidate,
+  "market_state" | "market_primitive_kind" | "pricing_model_kind" | "trading_eligibility" | "quality_gate_reasons"
+>;
+
+function attachPrimitiveAssessment(candidate: ProposalCandidateBase): ProposalCandidate {
+  const assessment = assessMarketPrimitive({
+    title: candidate.title,
+    category: candidate.category,
+    signal_source_type: "agent",
+    resolution_spec: candidate.resolution_spec,
+  });
+  if (assessment.market_state === "watch_case") {
+    throw new Error(`belief_watch_case:${assessment.quality_gate_reasons.join(",")}`);
+  }
+
+  return {
+    ...candidate,
+    ...assessment,
+  };
+}
+
 function buildPriceThresholdCandidate(belief: SynthesizedBelief, resolutionSpec: ResolutionSpec): ProposalCandidate {
   if (resolutionSpec.kind !== "price_threshold") {
     throw new Error("belief_resolution_kind_mismatch");
@@ -127,7 +150,7 @@ function buildPriceThresholdCandidate(belief: SynthesizedBelief, resolutionSpec:
   const dateLabel = formatDateLabel(belief.hypothesis.target_time);
   const asset = belief.hypothesis.subject;
 
-  return {
+  return attachPrimitiveAssessment({
     title: `Will ${asset} trade ${operatorPhrase(operator)} $${thresholdLabel} by ${dateLabel}?`,
     category: belief.hypothesis.category,
     close_time: belief.hypothesis.target_time,
@@ -141,7 +164,7 @@ function buildPriceThresholdCandidate(belief: SynthesizedBelief, resolutionSpec:
     },
     dedupe_key: belief.hypothesis.dedupe_key,
     source_belief_id: belief.id,
-  };
+  });
 }
 
 function buildRateDecisionCandidate(belief: SynthesizedBelief, resolutionSpec: ResolutionSpec): ProposalCandidate {
@@ -154,7 +177,7 @@ function buildRateDecisionCandidate(belief: SynthesizedBelief, resolutionSpec: R
   const dateLabel = formatDateLabel(belief.hypothesis.target_time);
   const institution = belief.hypothesis.subject;
 
-  return {
+  return attachPrimitiveAssessment({
     title: `Will ${institution} ${verb} by ${dateLabel}?`,
     category: belief.hypothesis.category,
     close_time: belief.hypothesis.target_time,
@@ -168,7 +191,7 @@ function buildRateDecisionCandidate(belief: SynthesizedBelief, resolutionSpec: R
     },
     dedupe_key: belief.hypothesis.dedupe_key,
     source_belief_id: belief.id,
-  };
+  });
 }
 
 function buildEventOccurrenceCandidate(belief: SynthesizedBelief, resolutionSpec: ResolutionSpec): ProposalCandidate {
@@ -181,7 +204,7 @@ function buildEventOccurrenceCandidate(belief: SynthesizedBelief, resolutionSpec
   const predicate = belief.hypothesis.predicate.replace(/\s+by target date$/i, "").trim();
   const readablePredicate = predicate.length > 0 ? predicate : `${subject} will occur`;
 
-  return {
+  return attachPrimitiveAssessment({
     title: `Will ${subject} occur by ${dateLabel}?`,
     category: belief.hypothesis.category,
     close_time: belief.hypothesis.target_time,
@@ -195,7 +218,32 @@ function buildEventOccurrenceCandidate(belief: SynthesizedBelief, resolutionSpec
     },
     dedupe_key: belief.hypothesis.dedupe_key,
     source_belief_id: belief.id,
-  };
+  });
+}
+
+function buildGameResultCandidate(belief: SynthesizedBelief, resolutionSpec: ResolutionSpec): ProposalCandidate {
+  if (resolutionSpec.kind !== "game_result") {
+    throw new Error("belief_resolution_kind_mismatch");
+  }
+
+  const dateLabel = formatDateLabel(belief.hypothesis.target_time);
+  const expectedWinner = resolutionSpec.decision_rule.expected_winner;
+
+  return attachPrimitiveAssessment({
+    title: `Will ${expectedWinner} win on ${dateLabel}?`,
+    category: belief.hypothesis.category,
+    close_time: belief.hypothesis.target_time,
+    resolution_criteria: `Resolve YES if ${resolutionSpec.source.canonical_url} reports ${expectedWinner} as the game winner.`,
+    resolution_spec: {
+      ...resolutionSpec,
+      source: {
+        ...resolutionSpec.source,
+        allowed_domains: normalizeAllowedDomainsFromUrl(resolutionSpec.source.canonical_url),
+      },
+    },
+    dedupe_key: belief.hypothesis.dedupe_key,
+    source_belief_id: belief.id,
+  });
 }
 
 function buildProposalCandidate(belief: SynthesizedBelief) {
@@ -211,6 +259,8 @@ function buildProposalCandidate(belief: SynthesizedBelief) {
       return buildRateDecisionCandidate(belief, resolutionSpec);
     case "event_occurrence":
       return buildEventOccurrenceCandidate(belief, resolutionSpec);
+    case "game_result":
+      return buildGameResultCandidate(belief, resolutionSpec);
     default:
       throw new Error("belief_resolution_kind_unsupported");
   }
@@ -284,6 +334,11 @@ async function submitProposal(belief: SynthesizedBelief) {
       resolution_criteria: proposal.resolution_criteria,
       resolution_spec: proposal.resolution_spec,
       dedupe_key: proposal.dedupe_key,
+      market_state: proposal.market_state,
+      market_primitive_kind: proposal.market_primitive_kind,
+      pricing_model_kind: proposal.pricing_model_kind,
+      trading_eligibility: proposal.trading_eligibility,
+      quality_gate_reasons: proposal.quality_gate_reasons,
       origin: "automation",
       signal_source_id: proposal.source_belief_id,
       signal_source_type: "agent",
@@ -374,11 +429,13 @@ async function tick() {
         }
       } catch (error) {
         if (
+          String(error).includes("belief_watch_case") ||
           String(error).includes("belief_not_machine_resolvable") ||
           String(error).includes("belief_resolution_kind_unsupported") ||
           String(error).includes("belief_resolution_kind_mismatch")
         ) {
-          await updateBeliefStatus(belief.id, "suppressed", { reason: String(error) });
+          const terminalStatus = String(error).includes("belief_watch_case") ? "watch_case" : "suppressed";
+          await updateBeliefStatus(belief.id, terminalStatus, { reason: String(error) });
           return;
         }
 

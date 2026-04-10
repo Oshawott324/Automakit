@@ -69,6 +69,10 @@ export function summarizeObservation(
     return `Collected event occurrence observation (${String(payload[spec.decision_rule.observation_field])}); derived ${outcome}.`;
   }
 
+  if (spec.kind === "game_result") {
+    return `Collected game result winner (${String(payload[spec.decision_rule.winner_field])}); derived ${outcome}.`;
+  }
+
   return `Collected rate decision observation (${String(payload[spec.decision_rule.previous_field])} -> ${String(payload[spec.decision_rule.current_field])}); derived ${outcome}.`;
 }
 

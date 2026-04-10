@@ -65,6 +65,24 @@ First-class state objects:
 - `ResolutionContract` (`resolution_spec` + source-of-truth contract)
 - `OutcomeRecord` (resolved truth + scoring feedback)
 
+## 3.1 Market Primitive Gate
+
+Market generation is primitive-first, not domain-first. Domains only become useful when they map to a resolvable primitive:
+
+- `scheduled_competition`: sports fixture result, backed by a `game_result` resolution spec.
+- `scheduled_decision`: central-bank or official decision, backed by a `rate_decision` resolution spec.
+- `scheduled_numeric_release`: official numeric print threshold, backed by a numeric observation contract.
+- `threshold_observation`: liquid price/weather/metric threshold, backed by a deterministic observation source.
+- `authoritative_occurrence_claim`: narrowly worded occurrence claim with a canonical source.
+
+Readiness states:
+
+- `watch_case`: interesting evidence, but no supported primitive contract yet.
+- `market_candidate`: resolvable and listable, but not necessarily tradable.
+- `tradable_market`: listable plus a supported pricing/trading gate.
+
+Schedule evidence alone can create reliable market candidates. It should not create automatic trades unless a pricing model and edge gate also pass.
+
 ## 4. Concrete Tranche Plan (Strict Order)
 
 Execution order is fixed:

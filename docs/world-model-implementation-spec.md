@@ -235,6 +235,7 @@ export type BeliefHypothesisProposal = {
     | "price_threshold"
     | "rate_decision"
     | "filing_detected"
+    | "event_occurrence"
     | "game_result";
   category: string;
   subject: string;

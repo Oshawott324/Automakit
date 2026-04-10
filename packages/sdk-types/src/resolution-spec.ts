@@ -1,4 +1,4 @@
-export type ResolutionKind = "price_threshold" | "rate_decision" | "event_occurrence";
+export type ResolutionKind = "price_threshold" | "rate_decision" | "event_occurrence" | "game_result";
 export type ResolutionOutcome = "YES" | "NO" | "CANCELED";
 export type ResolutionAgreement = "all" | "majority" | "2_of_3";
 export type ObservationFieldType = "number" | "string" | "boolean";
@@ -48,7 +48,17 @@ export type EventOccurrenceDecisionRule = {
   expected_value: boolean;
 };
 
-export type DecisionRule = PriceThresholdDecisionRule | RateDecisionRule | EventOccurrenceDecisionRule;
+export type GameResultDecisionRule = {
+  kind: "game_result";
+  winner_field: string;
+  expected_winner: string;
+};
+
+export type DecisionRule =
+  | PriceThresholdDecisionRule
+  | RateDecisionRule
+  | EventOccurrenceDecisionRule
+  | GameResultDecisionRule;
 
 export type QuorumRule = {
   min_observations: number;
@@ -85,6 +95,14 @@ export type ResolutionSpec =
       source: ResolutionSourceSpec;
       observation_schema: ObservationSchema;
       decision_rule: EventOccurrenceDecisionRule;
+      quorum_rule: QuorumRule;
+      quarantine_rule: QuarantineRule;
+    }
+  | {
+      kind: "game_result";
+      source: ResolutionSourceSpec;
+      observation_schema: ObservationSchema;
+      decision_rule: GameResultDecisionRule;
       quorum_rule: QuorumRule;
       quarantine_rule: QuarantineRule;
     };
@@ -130,6 +148,13 @@ const resolutionRegistry: Record<ResolutionKind, ResolutionRegistryEntry> = {
     allowed_domains: [],
     required_fields: {
       occurred: "boolean",
+    },
+  },
+  game_result: {
+    kind: "game_result",
+    allowed_domains: [],
+    required_fields: {
+      winner: "string",
     },
   },
 };
@@ -207,6 +232,16 @@ export function deriveOutcomeFromResolutionSpec(
       return null;
     }
     return observedValue === spec.decision_rule.expected_value ? "YES" : "NO";
+  }
+
+  if (spec.kind === "game_result") {
+    const observedWinner = payload[spec.decision_rule.winner_field];
+    if (typeof observedWinner !== "string" || observedWinner.trim().length === 0) {
+      return null;
+    }
+    return observedWinner.trim().toLowerCase() === spec.decision_rule.expected_winner.trim().toLowerCase()
+      ? "YES"
+      : "NO";
   }
 
   const previous = payload[spec.decision_rule.previous_field];
@@ -359,6 +394,21 @@ export function validateResolutionSpec(spec: unknown): ResolutionSpecValidationR
       errors.push("event_occurrence_observation_field_missing");
     } else if (field.type !== "boolean") {
       errors.push("event_occurrence_observation_field_must_be_boolean");
+    }
+  }
+
+  if (typedSpec.kind === "game_result") {
+    const field = typedSpec.observation_schema.fields[typedSpec.decision_rule.winner_field];
+    if (!field) {
+      errors.push("game_result_winner_field_missing");
+    } else if (field.type !== "string") {
+      errors.push("game_result_winner_field_must_be_string");
+    }
+    if (
+      typeof typedSpec.decision_rule.expected_winner !== "string" ||
+      typedSpec.decision_rule.expected_winner.trim().length === 0
+    ) {
+      errors.push("game_result_expected_winner_required");
     }
   }
 
