@@ -105,6 +105,7 @@ Responsibilities:
 - Execute CAMEL/Oasis-compatible simulation workers under versioned contracts.
 - Accept `SimulationRunRequest` payloads and return typed world-model/scenario artifacts.
 - Keep prompting and tool wiring in the simulation runtime while leaving deterministic validation to platform services.
+- Stay upstream of release-gated execution; simulation success must never grant live scopes or bypass promotion artifacts.
 
 This service is a runtime boundary, not a source of truth.
 

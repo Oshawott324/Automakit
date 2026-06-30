@@ -25,27 +25,36 @@ export PROPOSAL_PIPELINE_URL="${PROPOSAL_PIPELINE_URL:-http://127.0.0.1:4005}"
 export RESOLUTION_SERVICE_URL="${RESOLUTION_SERVICE_URL:-http://127.0.0.1:4006}"
 export MATCHING_ENGINE_URL="${MATCHING_ENGINE_URL:-http://127.0.0.1:7400}"
 
-DEFAULT_DEV_PACKAGES=(
+EXECUTION_GATE_PACKAGES=(
+  "@automakit/auth-registry"
+  "@automakit/agent-gateway"
   "@automakit/market-service"
   "@automakit/portfolio-service"
-  "@automakit/proposal-pipeline"
+  "@automakit/release-gate"
   "@automakit/resolution-service"
+  "@automakit/stream-service"
+)
+
+MARKET_AUTOMATION_PACKAGES=(
   "@automakit/world-input"
   "@automakit/event-builder"
+  "@automakit/simulation-orchestrator"
   "@automakit/world-model"
   "@automakit/scenario-agent"
   "@automakit/synthesis-agent"
   "@automakit/approval-agent"
   "@automakit/proposal-agent"
-  "@automakit/simulation-orchestrator"
+  "@automakit/proposal-pipeline"
   "@automakit/resolution-collector"
 )
 
 if [[ -n "${AUTOMAKIT_DEV_PACKAGES:-}" ]]; then
   # shellcheck disable=SC2206
   DEV_PACKAGES=(${AUTOMAKIT_DEV_PACKAGES})
+elif [[ "${AUTOMAKIT_DEV_PROFILE:-execution-gate}" == "market-automation" ]]; then
+  DEV_PACKAGES=("${EXECUTION_GATE_PACKAGES[@]}" "${MARKET_AUTOMATION_PACKAGES[@]}")
 else
-  DEV_PACKAGES=("${DEFAULT_DEV_PACKAGES[@]}")
+  DEV_PACKAGES=("${EXECUTION_GATE_PACKAGES[@]}")
 fi
 
 cleanup_existing_dev_processes() {
@@ -109,7 +118,7 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-echo "[dev] starting curated workspace stack"
+echo "[dev] starting curated workspace stack (${AUTOMAKIT_DEV_PROFILE:-execution-gate})"
 cleanup_existing_dev_processes
 
 for pkg in "${DEV_PACKAGES[@]}"; do

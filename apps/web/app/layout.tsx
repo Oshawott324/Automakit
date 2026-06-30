@@ -4,7 +4,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Automakit",
-  description: "Agent-first prediction market interface",
+  description: "Release gate for market-facing software agents",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

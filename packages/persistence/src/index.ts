@@ -245,6 +245,84 @@ export async function ensureCoreSchema(pool: Pool) {
     CREATE INDEX IF NOT EXISTS idx_world_input_runs_source_started
       ON world_input_runs (source_id, started_at DESC);
 
+    CREATE TABLE IF NOT EXISTS belief_sources (
+      id TEXT PRIMARY KEY,
+      key TEXT NOT NULL UNIQUE,
+      adapter TEXT NOT NULL,
+      source_url TEXT NOT NULL,
+      trust_tier TEXT NOT NULL,
+      status TEXT NOT NULL,
+      config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+      provenance JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_belief_sources_adapter_status
+      ON belief_sources (adapter, status);
+
+    CREATE TABLE IF NOT EXISTS external_market_refs (
+      id TEXT PRIMARY KEY,
+      belief_source_id TEXT NOT NULL REFERENCES belief_sources(id) ON DELETE CASCADE,
+      source_market_id TEXT NOT NULL,
+      source_market_slug TEXT,
+      market_url TEXT NOT NULL,
+      title TEXT NOT NULL,
+      question TEXT,
+      description TEXT,
+      category TEXT,
+      status TEXT NOT NULL,
+      close_time TIMESTAMPTZ,
+      end_time TIMESTAMPTZ,
+      raw_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+      provenance JSONB NOT NULL DEFAULT '{}'::jsonb,
+      first_seen_at TIMESTAMPTZ NOT NULL,
+      last_seen_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL,
+      UNIQUE (belief_source_id, source_market_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_external_market_refs_source_seen
+      ON external_market_refs (belief_source_id, last_seen_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_external_market_refs_close_time
+      ON external_market_refs (close_time);
+
+    CREATE TABLE IF NOT EXISTS belief_prior_snapshots (
+      id TEXT PRIMARY KEY,
+      snapshot_key TEXT NOT NULL UNIQUE,
+      belief_source_id TEXT NOT NULL REFERENCES belief_sources(id) ON DELETE CASCADE,
+      external_market_ref_id TEXT NOT NULL REFERENCES external_market_refs(id) ON DELETE CASCADE,
+      source_market_id TEXT NOT NULL,
+      outcome_id TEXT NOT NULL,
+      outcome_name TEXT NOT NULL,
+      probability DOUBLE PRECISION NOT NULL,
+      liquidity DOUBLE PRECISION,
+      volume DOUBLE PRECISION,
+      best_bid DOUBLE PRECISION,
+      best_ask DOUBLE PRECISION,
+      last_trade_price DOUBLE PRECISION,
+      market_status TEXT NOT NULL,
+      outcomes JSONB NOT NULL DEFAULT '[]'::jsonb,
+      tokens JSONB NOT NULL DEFAULT '[]'::jsonb,
+      prices JSONB NOT NULL DEFAULT '[]'::jsonb,
+      raw_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+      provenance JSONB NOT NULL DEFAULT '{}'::jsonb,
+      fetched_at TIMESTAMPTZ NOT NULL,
+      effective_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_belief_prior_snapshots_source_fetched
+      ON belief_prior_snapshots (belief_source_id, fetched_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_belief_prior_snapshots_market_fetched
+      ON belief_prior_snapshots (external_market_ref_id, fetched_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_belief_prior_snapshots_outcome_fetched
+      ON belief_prior_snapshots (source_market_id, outcome_id, fetched_at DESC);
+
     CREATE TABLE IF NOT EXISTS simulation_runs (
       id TEXT PRIMARY KEY,
       run_type TEXT NOT NULL,
@@ -276,6 +354,216 @@ export async function ensureCoreSchema(pool: Pool) {
 
     CREATE INDEX IF NOT EXISTS idx_simulation_runtime_runs_status_checked
       ON simulation_runtime_runs (status, last_checked_at ASC);
+
+    CREATE TABLE IF NOT EXISTS release_gate_snapshots (
+      id TEXT PRIMARY KEY,
+      snapshot_key TEXT NOT NULL UNIQUE,
+      gate_name TEXT NOT NULL,
+      gate_version TEXT NOT NULL,
+      candidate_kind TEXT NOT NULL,
+      candidate_id TEXT NOT NULL,
+      candidate_version TEXT NOT NULL,
+      projection_runtime TEXT NOT NULL,
+      semantic_facade_version TEXT NOT NULL,
+      manifest JSONB NOT NULL DEFAULT '{}'::jsonb,
+      criteria JSONB NOT NULL DEFAULT '{}'::jsonb,
+      source_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_by_agent_id TEXT REFERENCES agents(id) ON DELETE RESTRICT,
+      created_at TIMESTAMPTZ NOT NULL,
+      UNIQUE (gate_name, gate_version, candidate_kind, candidate_id, candidate_version)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_release_gate_snapshots_candidate_created
+      ON release_gate_snapshots (candidate_kind, candidate_id, created_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_release_gate_snapshots_gate_created
+      ON release_gate_snapshots (gate_name, gate_version, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS release_gate_runs (
+      id TEXT PRIMARY KEY,
+      run_key TEXT NOT NULL UNIQUE,
+      snapshot_id TEXT NOT NULL REFERENCES release_gate_snapshots(id) ON DELETE CASCADE,
+      projection_run_id TEXT REFERENCES simulation_runs(id) ON DELETE SET NULL,
+      status TEXT NOT NULL,
+      decision TEXT NOT NULL,
+      gate_manifest JSONB NOT NULL DEFAULT '{}'::jsonb,
+      projection_result JSONB NOT NULL DEFAULT '{}'::jsonb,
+      decision_result JSONB NOT NULL DEFAULT '{}'::jsonb,
+      failure_reason TEXT,
+      started_at TIMESTAMPTZ NOT NULL,
+      completed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_release_gate_runs_snapshot_started
+      ON release_gate_runs (snapshot_id, started_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_release_gate_runs_status_started
+      ON release_gate_runs (status, started_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_release_gate_runs_decision_updated
+      ON release_gate_runs (decision, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS release_gate_tool_calls (
+      id TEXT PRIMARY KEY,
+      gate_run_id TEXT NOT NULL REFERENCES release_gate_runs(id) ON DELETE CASCADE,
+      rollout_id TEXT,
+      call_key TEXT NOT NULL,
+      agent_id TEXT REFERENCES agents(id) ON DELETE RESTRICT,
+      tool_namespace TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      semantic_facade_version TEXT NOT NULL,
+      request_manifest JSONB NOT NULL DEFAULT '{}'::jsonb,
+      response_result JSONB NOT NULL DEFAULT '{}'::jsonb,
+      error_result JSONB,
+      state_before_hash TEXT,
+      state_after_hash TEXT,
+      evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+      status TEXT NOT NULL,
+      started_at TIMESTAMPTZ NOT NULL,
+      completed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL,
+      UNIQUE (gate_run_id, call_key)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_release_gate_tool_calls_run_started
+      ON release_gate_tool_calls (gate_run_id, started_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_release_gate_tool_calls_tool_status
+      ON release_gate_tool_calls (tool_namespace, tool_name, status);
+
+    CREATE TABLE IF NOT EXISTS release_gate_semantic_events (
+      sequence_id BIGSERIAL PRIMARY KEY,
+      event_id TEXT NOT NULL UNIQUE,
+      gate_run_id TEXT NOT NULL REFERENCES release_gate_runs(id) ON DELETE CASCADE,
+      rollout_id TEXT,
+      tool_call_id TEXT REFERENCES release_gate_tool_calls(id) ON DELETE SET NULL,
+      event_type TEXT NOT NULL,
+      semantic_facade_version TEXT NOT NULL,
+      aggregate_type TEXT NOT NULL,
+      aggregate_id TEXT NOT NULL,
+      causation_id TEXT,
+      correlation_id TEXT,
+      payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+      occurred_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_release_gate_semantic_events_run_sequence
+      ON release_gate_semantic_events (gate_run_id, sequence_id);
+
+    CREATE INDEX IF NOT EXISTS idx_release_gate_semantic_events_aggregate
+      ON release_gate_semantic_events (aggregate_type, aggregate_id, sequence_id);
+
+    CREATE INDEX IF NOT EXISTS idx_release_gate_semantic_events_type_occurred
+      ON release_gate_semantic_events (event_type, occurred_at DESC);
+
+    CREATE TABLE IF NOT EXISTS release_gate_verifier_checks (
+      id TEXT PRIMARY KEY,
+      gate_run_id TEXT NOT NULL REFERENCES release_gate_runs(id) ON DELETE CASCADE,
+      verifier_key TEXT NOT NULL,
+      verifier_version TEXT NOT NULL,
+      check_kind TEXT NOT NULL,
+      status TEXT NOT NULL,
+      hidden BOOLEAN NOT NULL DEFAULT FALSE,
+      score DOUBLE PRECISION,
+      threshold DOUBLE PRECISION,
+      expected_result JSONB NOT NULL DEFAULT '{}'::jsonb,
+      observed_result JSONB NOT NULL DEFAULT '{}'::jsonb,
+      evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+      error_result JSONB,
+      started_at TIMESTAMPTZ NOT NULL,
+      completed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL,
+      UNIQUE (gate_run_id, verifier_key)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_release_gate_verifier_checks_run
+      ON release_gate_verifier_checks (gate_run_id, created_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_release_gate_verifier_checks_status_completed
+      ON release_gate_verifier_checks (status, completed_at DESC);
+
+    CREATE TABLE IF NOT EXISTS release_gate_promotion_artifacts (
+      id TEXT PRIMARY KEY,
+      artifact_key TEXT NOT NULL UNIQUE,
+      gate_run_id TEXT NOT NULL REFERENCES release_gate_runs(id) ON DELETE CASCADE,
+      snapshot_id TEXT NOT NULL REFERENCES release_gate_snapshots(id) ON DELETE CASCADE,
+      candidate_kind TEXT NOT NULL,
+      candidate_id TEXT NOT NULL,
+      candidate_version TEXT NOT NULL,
+      artifact_kind TEXT NOT NULL,
+      status TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      approved_scopes JSONB NOT NULL DEFAULT '[]'::jsonb,
+      risk_limits JSONB NOT NULL DEFAULT '{}'::jsonb,
+      manifest JSONB NOT NULL DEFAULT '{}'::jsonb,
+      criteria_result JSONB NOT NULL DEFAULT '{}'::jsonb,
+      verifier_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+      rollout_plan JSONB NOT NULL DEFAULT '{}'::jsonb,
+      issued_at TIMESTAMPTZ NOT NULL,
+      expires_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL,
+      UNIQUE (gate_run_id, artifact_kind)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_release_gate_promotion_artifacts_snapshot_created
+      ON release_gate_promotion_artifacts (snapshot_id, created_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_release_gate_promotion_artifacts_status_created
+      ON release_gate_promotion_artifacts (status, created_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_release_gate_promotion_artifacts_candidate_status
+      ON release_gate_promotion_artifacts (candidate_kind, candidate_id, status, issued_at DESC);
+
+    CREATE TABLE IF NOT EXISTS release_gate_rollouts (
+      id TEXT PRIMARY KEY,
+      rollout_key TEXT NOT NULL UNIQUE,
+      gate_run_id TEXT NOT NULL REFERENCES release_gate_runs(id) ON DELETE CASCADE,
+      snapshot_id TEXT NOT NULL REFERENCES release_gate_snapshots(id) ON DELETE CASCADE,
+      status TEXT NOT NULL,
+      rollout_ordinal INTEGER NOT NULL,
+      seed INTEGER NOT NULL,
+      database_ref TEXT NOT NULL,
+      object_store_prefix TEXT,
+      fault_manifest JSONB NOT NULL DEFAULT '{}'::jsonb,
+      rollout_manifest JSONB NOT NULL DEFAULT '{}'::jsonb,
+      started_at TIMESTAMPTZ,
+      completed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL,
+      UNIQUE (gate_run_id, rollout_ordinal)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_release_gate_rollouts_run_updated
+      ON release_gate_rollouts (gate_run_id, updated_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_release_gate_rollouts_status_updated
+      ON release_gate_rollouts (status, updated_at DESC);
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'release_gate_tool_calls_rollout_fk'
+      ) THEN
+        ALTER TABLE release_gate_tool_calls
+          ADD CONSTRAINT release_gate_tool_calls_rollout_fk
+          FOREIGN KEY (rollout_id) REFERENCES release_gate_rollouts(id) ON DELETE SET NULL;
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'release_gate_semantic_events_rollout_fk'
+      ) THEN
+        ALTER TABLE release_gate_semantic_events
+          ADD CONSTRAINT release_gate_semantic_events_rollout_fk
+          FOREIGN KEY (rollout_id) REFERENCES release_gate_rollouts(id) ON DELETE SET NULL;
+      END IF;
+    END $$;
 
     CREATE TABLE IF NOT EXISTS world_state_proposals (
       id TEXT PRIMARY KEY,
@@ -624,6 +912,23 @@ export async function ensureCoreSchema(pool: Pool) {
     ALTER TABLE belief_hypothesis_proposals ADD COLUMN IF NOT EXISTS case_family_key TEXT;
     ALTER TABLE belief_hypothesis_proposals ADD COLUMN IF NOT EXISTS belief_role TEXT;
     ALTER TABLE belief_hypothesis_proposals ADD COLUMN IF NOT EXISTS publishability_score DOUBLE PRECISION;
+    ALTER TABLE belief_sources ADD COLUMN IF NOT EXISTS source_url TEXT NOT NULL DEFAULT '';
+    ALTER TABLE belief_sources ADD COLUMN IF NOT EXISTS provenance JSONB NOT NULL DEFAULT '{}'::jsonb;
+    ALTER TABLE external_market_refs ADD COLUMN IF NOT EXISTS question TEXT;
+    ALTER TABLE external_market_refs ADD COLUMN IF NOT EXISTS description TEXT;
+    ALTER TABLE external_market_refs ADD COLUMN IF NOT EXISTS category TEXT;
+    ALTER TABLE external_market_refs ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'unknown';
+    ALTER TABLE external_market_refs ADD COLUMN IF NOT EXISTS close_time TIMESTAMPTZ;
+    ALTER TABLE external_market_refs ADD COLUMN IF NOT EXISTS end_time TIMESTAMPTZ;
+    ALTER TABLE external_market_refs ADD COLUMN IF NOT EXISTS raw_payload JSONB NOT NULL DEFAULT '{}'::jsonb;
+    ALTER TABLE external_market_refs ADD COLUMN IF NOT EXISTS provenance JSONB NOT NULL DEFAULT '{}'::jsonb;
+    ALTER TABLE belief_prior_snapshots ADD COLUMN IF NOT EXISTS best_bid DOUBLE PRECISION;
+    ALTER TABLE belief_prior_snapshots ADD COLUMN IF NOT EXISTS best_ask DOUBLE PRECISION;
+    ALTER TABLE belief_prior_snapshots ADD COLUMN IF NOT EXISTS last_trade_price DOUBLE PRECISION;
+    ALTER TABLE belief_prior_snapshots ADD COLUMN IF NOT EXISTS outcomes JSONB NOT NULL DEFAULT '[]'::jsonb;
+    ALTER TABLE belief_prior_snapshots ADD COLUMN IF NOT EXISTS tokens JSONB NOT NULL DEFAULT '[]'::jsonb;
+    ALTER TABLE belief_prior_snapshots ADD COLUMN IF NOT EXISTS prices JSONB NOT NULL DEFAULT '[]'::jsonb;
+    ALTER TABLE belief_prior_snapshots ADD COLUMN IF NOT EXISTS provenance JSONB NOT NULL DEFAULT '{}'::jsonb;
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_proposals_semantic_dedupe_key
       ON proposals (semantic_dedupe_key)

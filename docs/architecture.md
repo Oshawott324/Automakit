@@ -2,14 +2,14 @@
 
 ## 1. Overview
 
-The MVP architecture is centralized and service-oriented. It optimizes for fast iteration, operational control, framework interoperability, and correctness under a paper-trading beta. It explicitly does not optimize for decentralization in v1.
+The MVP architecture is centralized and service-oriented. It optimizes for fast iteration, operational control, framework interoperability, and correctness under a release-gated execution model. Projection runs are used to decide whether an agent/tool/model version can receive live execution scopes; they are not a substitute for broker/exchange integration.
 
 The highest-priority system concern is not exchange throughput. It is world synchronization: keeping agent-generated market prices anchored to real-world outcomes through typed resolution rules, verified observations, and autonomous finalization or quarantine.
 
 The core operating rule is role separation:
 
-- platform-owned agents simulate beliefs, synthesize proposals, bootstrap liquidity, and collect settlement observations,
-- third-party agents primarily trade,
+- platform-owned agents simulate beliefs, synthesize proposals, bootstrap liquidity, collect settlement observations, and run release gates,
+- third-party agents trade only within scopes granted by release-gate promotion artifacts,
 - humans observe only.
 
 ## 2. System Context
@@ -45,6 +45,7 @@ Core Services
   -> Approval Agent
   -> Proposal Agent
   -> Proposal Pipeline
+  -> Release Gate
   -> Resolution Collector
   -> Resolution Service
   -> Stream Service
@@ -68,6 +69,9 @@ Data and Infra
 - Keep the external protocol framework-neutral.
 - Separate low-latency trading paths from slower AI and workflow paths.
 - Preserve a full audit trail for every market, order, fill, and resolution.
+- Preserve a full audit trail for every projection run, tool call, verifier check, promotion artifact, and live execution decision.
+- Treat projection and live execution as separate backends behind the same semantic execution facade.
+- Require promotion artifacts before live execution writes.
 - Require explicit source-of-truth metadata for every market.
 - Treat truth synchronization as a first-class subsystem alongside trading.
 - Prefer typed observations and deterministic resolution rules over free-text interpretation.
@@ -134,10 +138,11 @@ Human role:
 
 Responsibilities:
 
-- Public market browsing and event pages.
-- Agent leaderboard and profile views.
-- Observer dashboards.
-- Watch-only proposal and resolution timelines.
+- Release-gate console with recent runs, verifier decisions, candidate versions, semantic facade versions, and promotion artifact status.
+- Promotion artifact and live-adapter eligibility views.
+- Agent version views centered on release history, tool-call traces, state hashes, and verifier failures.
+- Projection market and event pages as secondary execution-test context.
+- Observer dashboards for watch-only proposal, projection, and resolution timelines.
 
 Suggested stack:
 
@@ -161,6 +166,8 @@ Responsibilities:
 - Agent registration and authentication.
 - Signed request verification.
 - HTTP API surface for orders, cancels, balances, and fills.
+- Release-gate tool-call recording when running under a projection rollout.
+- Promotion-artifact enforcement before live backend writes.
 
 This service should be intentionally thin and forward requests to internal domain services.
 
@@ -204,7 +211,7 @@ Responsibilities:
 - Match orders and emit fills.
 - Return acknowledgments and cancellation results.
 
-This is the latency-sensitive component and should be implemented separately from the rest of the application stack.
+This is the latency-sensitive projection backend for the current system and should be implemented separately from the rest of the application stack. It should not be mistaken for the live broker/exchange adapter; live execution should sit behind the same semantic facade once adapter work begins.
 
 Suggested stack:
 
@@ -221,8 +228,24 @@ Responsibilities:
 Current implementation notes:
 
 - Source of truth is the persisted `portfolio_accounts`, `portfolio_positions`, `portfolio_ledger_entries`, and `agent_risk_limits` tables in Postgres.
-- The service owns reservation, settlement, cancel release, complete-set minting, and autonomous resolution payout application.
+- The service owns projection reservation, settlement, cancel release, complete-set minting, and autonomous resolution payout application.
 - The current sell path is inventory-based; shorting is still disabled by default.
+
+### 4.8A Release Gate
+
+Responsibilities:
+
+- Create or reference production-shaped projection snapshots.
+- Create per-run rollout sandboxes with isolated database/object-store state.
+- Record tool calls, before/after state hashes, semantic events, verifier checks, and failures.
+- Run deterministic verifier checks over trading state and process evidence.
+- Issue promotion artifacts with approved scopes, risk limits, and expiry only after a passing verifier result.
+
+Current implementation notes:
+
+- Source of truth is persisted in `release_gate_snapshots`, `release_gate_runs`, `release_gate_rollouts`, `release_gate_tool_calls`, `release_gate_semantic_events`, `release_gate_verifier_checks`, and `release_gate_promotion_artifacts`.
+- `agent-gateway` records tool calls under `GATE_RUN_ID` and `GATE_ROLLOUT_ID`.
+- Rollout database cloning is bounded behind explicit environment configuration.
 
 ### 4.9 Proposal Pipeline
 
@@ -273,6 +296,7 @@ Responsibilities:
 - Accept run payloads from `simulation-orchestrator` and return validated world-state, scenario, and belief artifacts.
 - Version request and response schemas so runtime upgrades do not silently break orchestration.
 - Keep market/proposal persistence ownership in TypeScript services; runtime workers must not write exchange state directly.
+- Keep simulation outputs upstream of release-gated execution. A passing simulation run is not a promotion artifact and must not authorize live broker/exchange writes.
 
 Implementation direction:
 
@@ -462,7 +486,7 @@ Role policy:
 
 1. `world-input` ingestors poll configured feeds (including social sources) and persist normalized `world_signals`.
 2. `simulation-orchestrator` batches eligible signals and creates a simulation run.
-3. The orchestrator dispatches run payloads to simulation workers (TypeScript runtime today, Python CAMEL/Oasis runtime boundary next).
+3. The orchestrator dispatches run payloads to simulation workers through the TypeScript runtime path or the Python CAMEL/Oasis HTTP boundary.
 4. World-model and scenario workers emit typed proposals and hypotheses.
 5. Synthesis workers merge outputs into `synthesized_beliefs`.
 6. Approval agents evaluate each synthesized belief for machine-resolvability and manipulation risk.

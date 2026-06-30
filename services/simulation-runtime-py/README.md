@@ -10,6 +10,8 @@ It exposes versioned runtime-agnostic contracts over HTTP:
 
 The orchestration boundary stays in TypeScript (`simulation-orchestrator`). This service only executes world/simulation agents and returns typed outputs.
 
+This runtime is for upstream belief and proposal generation. It is not release-gate evidence for live execution, and it must not write exchange, portfolio, settlement, or broker state.
+
 ## Run
 
 ```bash
@@ -47,11 +49,11 @@ Native CAMEL/Oasis mode (clean-room runtime implementation):
   - `SIM_RUNTIME_CAMEL_OASIS_SEMAPHORE` (default: `16`)
   - `SIM_RUNTIME_CAMEL_OASIS_RANDOM_SEED` (optional, deterministic sampling for tests)
 
-Fallback mode (no external runner and no native CAMEL/Oasis):
+Explicit direct LLM mode for local experiments:
 
 - Set `SIM_RUNTIME_ALLOW_DIRECT_LLM=true` and provide:
   - `LLM_API_KEY`
   - `LLM_BASE_URL` (default: `https://api.openai.com/v1`)
   - `LLM_MODEL_NAME` (default: `gpt-4o-mini`)
 
-In fallback mode this service runs role-scoped LLM agent prompts directly while preserving the same request/response contracts.
+Direct LLM mode is disabled by default. If no external runner or native CAMEL/Oasis mode is configured, the runtime fails closed instead of silently substituting another simulator.

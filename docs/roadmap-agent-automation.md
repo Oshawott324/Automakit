@@ -70,32 +70,32 @@ Human role:
 
 - watch-only review of approval decisions and suppression reasons.
 
-Dependency gates (must pass in this exact order):
+Market-generation checkpoints (must pass in this exact order):
 
-1. Data-input gate
+1. Data-input checkpoint
 - Pass condition: source definitions are stored in platform state (DB), polling runs automatically, and normalized signals are written continuously without env-only source dependency.
-2. Simulation-engine gate
+2. Simulation-engine checkpoint
 - Pass condition: `simulation-orchestrator` can invoke the simulation runtime over versioned contracts and persist run outputs deterministically.
-3. Agent-quorum gate
+3. Agent-quorum checkpoint
 - Pass condition: approval agents evaluate synthesized beliefs and only quorum-approved beliefs proceed to proposal publication.
 
-Current gate status:
+Current checkpoint status:
 
-- Data-input gate: implemented with DB-managed `world_input_sources`, automatic polling workers, and real upstream adapter support (`http_json_*`, X, Reddit, RSS).
-- Simulation-engine gate: implemented (first cut) with `@automakit/sim-runtime-contracts`, runtime backend registry, and `services/simulation-runtime-py`.
-- Agent-quorum gate: implemented with approval-agent quorum decisions persisted in `listing_approval_cases` and `listing_approval_votes`.
+- Data-input checkpoint: implemented with DB-managed `world_input_sources`, automatic polling workers, and real upstream adapter support (`http_json_*`, X, Reddit, RSS).
+- Simulation-engine checkpoint: implemented (first cut) with `@automakit/sim-runtime-contracts`, runtime backend registry, and `services/simulation-runtime-py`.
+- Agent-quorum checkpoint: implemented with approval-agent quorum decisions persisted in `listing_approval_cases` and `listing_approval_votes`.
 
 Execution rule:
 
-- Do not start gate 2 before gate 1 is passing.
-- Do not start gate 3 before gate 2 is passing.
-- Do not publish from this path until gate 3 is passing.
+- Do not start checkpoint 2 before checkpoint 1 is passing.
+- Do not start checkpoint 3 before checkpoint 2 is passing.
+- Do not publish from this path until checkpoint 3 is passing.
 
 ## Phase 2: Autonomous Agent Trading
 
 Outcome:
 
-- Registered third-party trader agents can discover live markets, receive updates, and place/cancel orders in response to market conditions.
+- Registered third-party trader agents can discover markets, receive updates, and place/cancel orders in projection. Live order writes require a passing release-gate promotion artifact with explicit scopes and risk limits.
 
 Core capabilities:
 
@@ -104,6 +104,7 @@ Core capabilities:
 - fills and position updates,
 - pre-trade risk checks,
 - initial matching engine integration.
+- release-gate snapshots, rollout sandboxes, tool-call ledger, verifier checks, and promotion artifacts.
 
 Human role:
 
@@ -182,15 +183,16 @@ Core capabilities:
 
 ## Recommended Build Order
 
-1. Data-input gate: world-input polling with persisted source management and social-feed adapters.
-2. Simulation-engine gate: simulation orchestration plus Python runtime boundary for CAMEL/Oasis-compatible workers.
-3. Agent-quorum gate: approval-agent quorum before proposal publication.
+1. Data-input checkpoint: world-input polling with persisted source management and social-feed adapters.
+2. Simulation-engine checkpoint: simulation orchestration plus Python runtime boundary for CAMEL/Oasis-compatible workers.
+3. Agent-quorum checkpoint: approval-agent quorum before proposal publication.
 4. Real auth and trader runtime contract.
-5. Matching engine plus order/fill loop.
-6. Portfolio and risk loop.
-7. Resolution loop.
-8. Liquidity bootstrap agents.
-9. Framework adapters and richer UI.
+5. Matching engine plus order/fill loop as projection backend.
+6. Portfolio and risk loop with projection/live state separation.
+7. Release gate for promotion from projection to live scopes.
+8. Resolution loop.
+9. Liquidity bootstrap agents.
+10. Framework adapters and richer UI.
 
 ## MVP Definition Under This Roadmap
 

@@ -2,6 +2,9 @@ import { createHash } from "node:crypto";
 import type { MarketSignal } from "@automakit/sdk-types";
 import { loadSignals } from "./signals.js";
 
+// Legacy feed-to-proposal bridge. Keep disabled by default; production market
+// automation should flow through world-input, simulation, approval, and proposal agents.
+
 const proposalPipelineUrl = process.env.PROPOSAL_PIPELINE_URL ?? "http://127.0.0.1:4005";
 const loopIntervalMs = Number(process.env.MARKET_CREATOR_INTERVAL_MS ?? 15_000);
 const automationAgentId = process.env.MARKET_CREATOR_AGENT_ID ?? "automation-market-creator";

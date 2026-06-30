@@ -219,6 +219,15 @@ importers:
         specifier: ^5.3.2
         version: 5.8.2
 
+  services/release-gate:
+    dependencies:
+      '@automakit/persistence':
+        specifier: workspace:*
+        version: link:../../packages/persistence
+      fastify:
+        specifier: ^5.3.2
+        version: 5.8.2
+
   services/resolution-collector:
     dependencies:
       '@automakit/agent-llm':

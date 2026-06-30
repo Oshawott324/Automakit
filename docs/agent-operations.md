@@ -53,15 +53,26 @@ curl -sS -o /tmp/models.json -w "%{http_code}\n" \
 
 Expected status code: `200`.
 
-## Autonomous Runtime Start
+## Execution/Gate Runtime Start
 
-Use the native autonomous runtime entrypoint for fully automatic loops:
+Use the default dev entrypoint for the execution and release-gate path:
+
+```bash
+pnpm dev
+pnpm dev:matching-engine
+```
+
+This starts the core TypeScript services for agent auth, signed order entry, portfolio accounting, release-gate verification, resolution, and streams. It does not start the market-automation mesh unless explicitly requested.
+
+## Autonomous Market-Automation Runtime Start
+
+Use the native autonomous runtime entrypoint only when working on market automation:
 
 ```bash
 pnpm dev:autonomous:native
 ```
 
-This starts the Python simulation runtime and the TypeScript service mesh with polling/tick loops enabled.
+This starts the Python simulation runtime and the TypeScript market-automation service mesh with polling/tick loops enabled.
 
 Facts-layer components now run continuously as part of that mesh:
 

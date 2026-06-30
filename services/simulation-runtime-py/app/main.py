@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 from uuid import uuid4
@@ -92,8 +91,9 @@ async def health() -> dict:
         "service": "simulation-runtime-py",
         "status": "ok",
         "active_runs": sum(1 for run in runtime_runs.values() if run.status.state in ("queued", "running")),
-        "runner_configured": bool(os.getenv("CAMEL_OASIS_RUNNER_CMD")),
-        "direct_llm_enabled": os.getenv("SIM_RUNTIME_ALLOW_DIRECT_LLM", "true").lower() in ("1", "true", "yes", "on"),
+        "runner_configured": bool(adapter.runner_cmd),
+        "native_oasis_enabled": adapter.oasis_native.enabled,
+        "direct_llm_enabled": adapter.allow_direct_llm,
     }
 
 

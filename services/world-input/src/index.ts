@@ -21,10 +21,23 @@ import {
 
 type WorldInputAdapterKind =
   | SourceAdapterKind
+  | "polymarket_markets"
   | "opencli_command"
   | "x_api_recent_search"
   | "reddit_api_subreddit_new"
   | "news_rss";
+
+type SignalSourceWithConfig = SourceWithConfig & {
+  adapter: SourceAdapterKind;
+};
+
+type BeliefPriorSourceConfig = Omit<WorldInputSourceConfig, "adapter"> & {
+  adapter: "polymarket_markets";
+};
+
+type WorldInputSourceConfigValidation =
+  | { ok: true; config: WorldInputSourceConfig | BeliefPriorSourceConfig }
+  | { ok: false; errors: string[] };
 
 type WorldSignalRow = {
   id: string;
@@ -97,7 +110,101 @@ type SourceTestResponse = {
   source: SourceWithConfig;
   fetched_count: number;
   next_cursor: string | null;
-  sample_signals: WorldSignal[];
+  sample_signals?: WorldSignal[];
+  sample_belief_priors?: NormalizedBeliefPrior[];
+};
+
+type BeliefSourceRow = {
+  id: string;
+  key: string;
+  adapter: string;
+  source_url: string;
+  trust_tier: TrustTier;
+  status: string;
+  config_json: unknown;
+  provenance: unknown;
+  created_at: unknown;
+  updated_at: unknown;
+};
+
+type ExternalMarketRefRow = {
+  id: string;
+  belief_source_id: string;
+  source_key?: string;
+  source_adapter?: string;
+  source_market_id: string;
+  source_market_slug: string | null;
+  market_url: string;
+  title: string;
+  question: string | null;
+  description: string | null;
+  category: string | null;
+  status: string;
+  close_time: unknown;
+  end_time: unknown;
+  raw_payload: unknown;
+  provenance: unknown;
+  first_seen_at: unknown;
+  last_seen_at: unknown;
+  created_at: unknown;
+  updated_at: unknown;
+};
+
+type BeliefPriorSnapshotRow = {
+  id: string;
+  snapshot_key: string;
+  belief_source_id: string;
+  source_key?: string;
+  source_adapter?: string;
+  external_market_ref_id: string;
+  source_market_id: string;
+  market_url?: string;
+  market_title?: string;
+  outcome_id: string;
+  outcome_name: string;
+  probability: number;
+  liquidity: number | null;
+  volume: number | null;
+  best_bid: number | null;
+  best_ask: number | null;
+  last_trade_price: number | null;
+  market_status: string;
+  outcomes: unknown;
+  tokens: unknown;
+  prices: unknown;
+  raw_payload: unknown;
+  provenance: unknown;
+  fetched_at: unknown;
+  effective_at: unknown;
+  created_at: unknown;
+};
+
+type NormalizedBeliefPrior = {
+  source_market_id: string;
+  source_market_slug: string | null;
+  market_url: string;
+  title: string;
+  question: string | null;
+  description: string | null;
+  category: string | null;
+  status: string;
+  close_time: string | null;
+  end_time: string | null;
+  outcome_id: string;
+  outcome_name: string;
+  probability: number;
+  liquidity: number | null;
+  volume: number | null;
+  best_bid: number | null;
+  best_ask: number | null;
+  last_trade_price: number | null;
+  outcomes: string[];
+  tokens: string[];
+  prices: number[];
+  raw_payload: Record<string, unknown>;
+  provenance: Record<string, unknown>;
+  fetched_at: string;
+  effective_at: string | null;
 };
 
 const port = Number(process.env.WORLD_INPUT_PORT ?? 4010);
@@ -111,6 +218,7 @@ const sourceConcurrency = Math.max(1, Number(process.env.WORLD_INPUT_SOURCE_CONC
 const app = Fastify({ logger: true });
 const pool = createDatabasePool();
 const execFileAsync = promisify(execFile);
+const defaultPolymarketMarketsUrl = "https://gamma-api.polymarket.com/markets?closed=false&limit=100";
 
 const outboundProxyUrl =
   process.env.HTTPS_PROXY ??
@@ -167,6 +275,22 @@ function asNumber(value: unknown): number | null {
   return null;
 }
 
+function asBoolean(value: unknown): boolean | null {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true") {
+      return true;
+    }
+    if (normalized === "false") {
+      return false;
+    }
+  }
+  return null;
+}
+
 function readPath(root: unknown, path: string) {
   const segments = path
     .split(".")
@@ -208,6 +332,45 @@ function normalizeTimestamp(value: unknown): string | null {
   return Number.isNaN(timestamp.getTime()) ? null : timestamp.toISOString();
 }
 
+function parseJsonArray(value: unknown): unknown[] {
+  if (Array.isArray(value)) {
+    return value;
+  }
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return [];
+  }
+  const parsed = JSON.parse(value) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new Error("json_array_expected");
+  }
+  return parsed;
+}
+
+function parseStringArray(value: unknown, fieldName: string) {
+  try {
+    return parseJsonArray(value).map((entry) => String(entry));
+  } catch {
+    throw new Error(`polymarket_market_${fieldName}_invalid`);
+  }
+}
+
+function parseProbabilityArray(value: unknown, fieldName: string) {
+  try {
+    return parseJsonArray(value).map((entry, index) => {
+      const probability = asNumber(entry);
+      if (probability === null || probability < 0 || probability > 1) {
+        throw new Error(`polymarket_market_${fieldName}_invalid:${index}`);
+      }
+      return probability;
+    });
+  } catch (error) {
+    if (String(error).includes(`polymarket_market_${fieldName}_invalid`)) {
+      throw error;
+    }
+    throw new Error(`polymarket_market_${fieldName}_invalid`);
+  }
+}
+
 function mapSignalRow(row: WorldSignalRow): WorldSignal {
   return {
     id: row.id,
@@ -221,6 +384,77 @@ function mapSignalRow(row: WorldSignalRow): WorldSignal {
     payload: parseJsonField<Record<string, unknown>>(row.payload),
     entity_refs: parseJsonField<WorldEntityRef[]>(row.entity_refs),
     dedupe_key: row.dedupe_key,
+    fetched_at: toIsoTimestamp(row.fetched_at),
+    effective_at: row.effective_at ? toIsoTimestamp(row.effective_at) : null,
+    created_at: toIsoTimestamp(row.created_at),
+  };
+}
+
+function mapBeliefSourceRow(row: BeliefSourceRow) {
+  return {
+    id: row.id,
+    key: row.key,
+    adapter: row.adapter,
+    source_url: row.source_url,
+    trust_tier: row.trust_tier,
+    status: row.status,
+    config_json: parseJsonField<Record<string, unknown>>(row.config_json),
+    provenance: parseJsonField<Record<string, unknown>>(row.provenance),
+    created_at: toIsoTimestamp(row.created_at),
+    updated_at: toIsoTimestamp(row.updated_at),
+  };
+}
+
+function mapExternalMarketRefRow(row: ExternalMarketRefRow) {
+  return {
+    id: row.id,
+    belief_source_id: row.belief_source_id,
+    source_key: row.source_key ?? null,
+    source_adapter: row.source_adapter ?? null,
+    source_market_id: row.source_market_id,
+    source_market_slug: row.source_market_slug,
+    market_url: row.market_url,
+    title: row.title,
+    question: row.question,
+    description: row.description,
+    category: row.category,
+    status: row.status,
+    close_time: row.close_time ? toIsoTimestamp(row.close_time) : null,
+    end_time: row.end_time ? toIsoTimestamp(row.end_time) : null,
+    raw_payload: parseJsonField<Record<string, unknown>>(row.raw_payload),
+    provenance: parseJsonField<Record<string, unknown>>(row.provenance),
+    first_seen_at: toIsoTimestamp(row.first_seen_at),
+    last_seen_at: toIsoTimestamp(row.last_seen_at),
+    created_at: toIsoTimestamp(row.created_at),
+    updated_at: toIsoTimestamp(row.updated_at),
+  };
+}
+
+function mapBeliefPriorSnapshotRow(row: BeliefPriorSnapshotRow) {
+  return {
+    id: row.id,
+    snapshot_key: row.snapshot_key,
+    belief_source_id: row.belief_source_id,
+    source_key: row.source_key ?? null,
+    source_adapter: row.source_adapter ?? null,
+    external_market_ref_id: row.external_market_ref_id,
+    source_market_id: row.source_market_id,
+    market_url: row.market_url ?? null,
+    market_title: row.market_title ?? null,
+    outcome_id: row.outcome_id,
+    outcome_name: row.outcome_name,
+    probability: Number(row.probability),
+    liquidity: row.liquidity === null ? null : Number(row.liquidity),
+    volume: row.volume === null ? null : Number(row.volume),
+    best_bid: row.best_bid === null ? null : Number(row.best_bid),
+    best_ask: row.best_ask === null ? null : Number(row.best_ask),
+    last_trade_price: row.last_trade_price === null ? null : Number(row.last_trade_price),
+    market_status: row.market_status,
+    outcomes: parseJsonField<string[]>(row.outcomes),
+    tokens: parseJsonField<string[]>(row.tokens),
+    prices: parseJsonField<number[]>(row.prices),
+    raw_payload: parseJsonField<Record<string, unknown>>(row.raw_payload),
+    provenance: parseJsonField<Record<string, unknown>>(row.provenance),
     fetched_at: toIsoTimestamp(row.fetched_at),
     effective_at: row.effective_at ? toIsoTimestamp(row.effective_at) : null,
     created_at: toIsoTimestamp(row.created_at),
@@ -253,6 +487,8 @@ function mapSourceRow(row: WorldInputSourceRow): SourceWithConfig {
 
 function sourceKindFromAdapter(adapter: WorldInputAdapterKind): string {
   switch (adapter) {
+    case "polymarket_markets":
+      return "belief_prior";
     case "opencli_command":
       return "news";
     case "x_api_recent_search":
@@ -274,6 +510,60 @@ function sourceKindFromAdapter(adapter: WorldInputAdapterKind): string {
     default:
       return "external";
   }
+}
+
+function isBeliefPriorAdapter(adapter: WorldInputAdapterKind): adapter is "polymarket_markets" {
+  return adapter === "polymarket_markets";
+}
+
+function validateTrustTier(value: unknown): value is TrustTier {
+  return value === "official" || value === "exchange" || value === "curated" || value === "derived";
+}
+
+function validatePolymarketSourceConfig(config: Record<string, unknown>): WorldInputSourceConfigValidation {
+  const errors: string[] = [];
+  const key = asString(config.key);
+  const url = asString(config.url) ?? asString(config.source_url) ?? defaultPolymarketMarketsUrl;
+  const pollIntervalSeconds = asNumber(config.poll_interval_seconds);
+  const trustTier = config.trust_tier;
+
+  if (!key) {
+    errors.push("world_input_source_key_required");
+  }
+  if (config.adapter !== "polymarket_markets") {
+    errors.push("world_input_source_adapter_unsupported");
+  }
+  if (pollIntervalSeconds === null || pollIntervalSeconds <= 0) {
+    errors.push("world_input_source_poll_interval_invalid");
+  }
+  if (!validateTrustTier(trustTier)) {
+    errors.push("world_input_source_trust_tier_required");
+  }
+  try {
+    new URL(url);
+  } catch {
+    errors.push("world_input_source_url_invalid");
+  }
+
+  return errors.length > 0
+    ? { ok: false, errors }
+    : {
+        ok: true,
+        config: {
+          key: key!,
+          adapter: "polymarket_markets",
+          url,
+          poll_interval_seconds: pollIntervalSeconds!,
+          trust_tier: trustTier as TrustTier,
+        },
+      };
+}
+
+function validateSourceConfig(config: Record<string, unknown>): WorldInputSourceConfigValidation {
+  if (asString(config.adapter) === "polymarket_markets") {
+    return validatePolymarketSourceConfig(config);
+  }
+  return validateWorldInputSourceConfig(config);
 }
 
 function sanitizeSummary(value: string | null, fallback: string) {
@@ -341,7 +631,7 @@ function normalizePublishCategory(value: string | null) {
 }
 
 function inferSignalRole(
-  source: SourceWithConfig,
+  source: SignalSourceWithConfig,
   payload: Record<string, unknown>,
   normalizedCategory: string | null,
 ) {
@@ -370,7 +660,7 @@ function inferSignalRole(
 }
 
 function buildSignalPayloadEnrichments(
-  source: SourceWithConfig,
+  source: SignalSourceWithConfig,
   input: Record<string, unknown>,
   payload: Record<string, unknown>,
   sourceUrl: string | null,
@@ -582,6 +872,7 @@ function configWithoutKnownKeys(input: Record<string, unknown>) {
   delete clone.key;
   delete clone.adapter;
   delete clone.url;
+  delete clone.source_url;
   delete clone.poll_interval_seconds;
   delete clone.backfill_hours;
   delete clone.trust_tier;
@@ -661,7 +952,223 @@ async function upsertSignal(signal: WorldSignal) {
   return (result.rowCount ?? 0) > 0;
 }
 
-function normalizeSignalFromItem(source: SourceWithConfig, item: Record<string, unknown>): WorldSignal {
+async function upsertBeliefSource(source: SourceWithConfig, sourceUrl: string) {
+  const result = await pool.query<BeliefSourceRow>(
+    `
+      INSERT INTO belief_sources (
+        id,
+        key,
+        adapter,
+        source_url,
+        trust_tier,
+        status,
+        config_json,
+        provenance,
+        created_at,
+        updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, 'active', $6::jsonb, $7::jsonb, NOW(), NOW())
+      ON CONFLICT (key) DO UPDATE SET
+        adapter = EXCLUDED.adapter,
+        source_url = EXCLUDED.source_url,
+        trust_tier = EXCLUDED.trust_tier,
+        status = EXCLUDED.status,
+        config_json = EXCLUDED.config_json,
+        provenance = EXCLUDED.provenance,
+        updated_at = NOW()
+      RETURNING *
+    `,
+    [
+      randomUUID(),
+      source.key,
+      source.adapter,
+      sourceUrl,
+      source.trust_tier,
+      JSON.stringify(source.config_json),
+      JSON.stringify({
+        world_input_source_id: source.id,
+        source_key: source.key,
+        adapter: source.adapter,
+      }),
+    ],
+  );
+
+  return mapBeliefSourceRow(result.rows[0]);
+}
+
+async function upsertExternalMarketRef(beliefSourceId: string, prior: NormalizedBeliefPrior) {
+  const result = await pool.query<ExternalMarketRefRow>(
+    `
+      INSERT INTO external_market_refs (
+        id,
+        belief_source_id,
+        source_market_id,
+        source_market_slug,
+        market_url,
+        title,
+        question,
+        description,
+        category,
+        status,
+        close_time,
+        end_time,
+        raw_payload,
+        provenance,
+        first_seen_at,
+        last_seen_at,
+        created_at,
+        updated_at
+      )
+      VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+        $11::timestamptz, $12::timestamptz, $13::jsonb, $14::jsonb,
+        $15::timestamptz, $15::timestamptz, NOW(), NOW()
+      )
+      ON CONFLICT (belief_source_id, source_market_id) DO UPDATE SET
+        source_market_slug = EXCLUDED.source_market_slug,
+        market_url = EXCLUDED.market_url,
+        title = EXCLUDED.title,
+        question = EXCLUDED.question,
+        description = EXCLUDED.description,
+        category = EXCLUDED.category,
+        status = EXCLUDED.status,
+        close_time = EXCLUDED.close_time,
+        end_time = EXCLUDED.end_time,
+        raw_payload = EXCLUDED.raw_payload,
+        provenance = EXCLUDED.provenance,
+        last_seen_at = EXCLUDED.last_seen_at,
+        updated_at = NOW()
+      RETURNING *
+    `,
+    [
+      randomUUID(),
+      beliefSourceId,
+      prior.source_market_id,
+      prior.source_market_slug,
+      prior.market_url,
+      prior.title,
+      prior.question,
+      prior.description,
+      prior.category,
+      prior.status,
+      prior.close_time,
+      prior.end_time,
+      JSON.stringify(prior.raw_payload),
+      JSON.stringify(prior.provenance),
+      prior.fetched_at,
+    ],
+  );
+
+  return mapExternalMarketRefRow(result.rows[0]);
+}
+
+async function insertBeliefPriorSnapshot(
+  beliefSourceId: string,
+  externalMarketRefId: string,
+  prior: NormalizedBeliefPrior,
+) {
+  const snapshotKey = buildDedupeKey({
+    belief_source_id: beliefSourceId,
+    source_market_id: prior.source_market_id,
+    outcome_id: prior.outcome_id,
+    probability: prior.probability,
+    fetched_at: prior.fetched_at,
+  });
+  const result = await pool.query<{ id: string }>(
+    `
+      INSERT INTO belief_prior_snapshots (
+        id,
+        snapshot_key,
+        belief_source_id,
+        external_market_ref_id,
+        source_market_id,
+        outcome_id,
+        outcome_name,
+        probability,
+        liquidity,
+        volume,
+        best_bid,
+        best_ask,
+        last_trade_price,
+        market_status,
+        outcomes,
+        tokens,
+        prices,
+        raw_payload,
+        provenance,
+        fetched_at,
+        effective_at,
+        created_at
+      )
+      VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8,
+        $9, $10, $11, $12, $13, $14,
+        $15::jsonb, $16::jsonb, $17::jsonb, $18::jsonb, $19::jsonb,
+        $20::timestamptz, $21::timestamptz, NOW()
+      )
+      ON CONFLICT (snapshot_key) DO NOTHING
+      RETURNING id
+    `,
+    [
+      randomUUID(),
+      snapshotKey,
+      beliefSourceId,
+      externalMarketRefId,
+      prior.source_market_id,
+      prior.outcome_id,
+      prior.outcome_name,
+      prior.probability,
+      prior.liquidity,
+      prior.volume,
+      prior.best_bid,
+      prior.best_ask,
+      prior.last_trade_price,
+      prior.status,
+      JSON.stringify(prior.outcomes),
+      JSON.stringify(prior.tokens),
+      JSON.stringify(prior.prices),
+      JSON.stringify(prior.raw_payload),
+      JSON.stringify(prior.provenance),
+      prior.fetched_at,
+      prior.effective_at,
+    ],
+  );
+
+  return (result.rowCount ?? 0) > 0;
+}
+
+async function persistBeliefPriors(source: SourceWithConfig, items: Record<string, unknown>[]) {
+  const sourceUrl = resolvePolymarketMarketsUrl(source);
+  const beliefSource = await upsertBeliefSource(source, sourceUrl);
+  const priors = normalizePolymarketPriorItems(
+    {
+      ...source,
+      source_url: sourceUrl,
+    },
+    items,
+  );
+
+  let acceptedCount = 0;
+  const marketRefIds = new Map<string, string>();
+  for (const prior of priors) {
+    const existingMarketRefId = marketRefIds.get(prior.source_market_id);
+    const externalMarketRefId =
+      existingMarketRefId ?? (await upsertExternalMarketRef(beliefSource.id, prior)).id;
+    marketRefIds.set(prior.source_market_id, externalMarketRefId);
+    const inserted = await insertBeliefPriorSnapshot(beliefSource.id, externalMarketRefId, prior);
+    if (inserted) {
+      acceptedCount += 1;
+    }
+  }
+
+  return {
+    accepted_count: acceptedCount,
+    prior_count: priors.length,
+    market_count: marketRefIds.size,
+  };
+}
+
+function normalizeSignalFromItem(source: SignalSourceWithConfig, item: Record<string, unknown>): WorldSignal {
   const config = source.config_json;
   const input = ensureObjectPayload(item);
   const basePayload = ensureObjectPayload(input.payload);
@@ -1144,8 +1651,186 @@ async function fetchNewsRssItems(source: SourceWithConfig): Promise<SourcePollRe
   };
 }
 
+function resolvePolymarketMarketsUrl(source: SourceWithConfig) {
+  const endpoint = source.source_url ?? asString(source.config_json.source_url) ?? defaultPolymarketMarketsUrl;
+  const url = new URL(endpoint);
+  const configuredLimit = asNumber(source.config_json.limit);
+  if (configuredLimit !== null && !url.searchParams.has("limit")) {
+    url.searchParams.set("limit", String(Math.max(1, Math.min(500, Math.trunc(configuredLimit)))));
+  }
+  return url.toString();
+}
+
+async function fetchPolymarketMarketItems(source: SourceWithConfig): Promise<SourcePollResult> {
+  const endpoint = resolvePolymarketMarketsUrl(source);
+  const response = await fetch(endpoint, {
+    headers: {
+      accept: "application/json",
+      "user-agent": "automakit-world-input/1.0",
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`world_input_source_polymarket_fetch_failed:${source.key}:${response.status}`);
+  }
+
+  const payload = (await response.json()) as unknown;
+  const items = extractArrayItemsFromPayload(payload, asString(source.config_json.items_path));
+
+  return {
+    items,
+    next_cursor: source.cursor_value,
+    metadata: {
+      adapter: source.adapter,
+      source_url: endpoint,
+      result_count: items.length,
+    },
+  };
+}
+
+function normalizePolymarketMarketStatus(item: Record<string, unknown>) {
+  const closed = asBoolean(item.closed);
+  const active = asBoolean(item.active);
+  const acceptingOrders = asBoolean(item.acceptingOrders);
+  if (closed === true) {
+    return "closed";
+  }
+  if (active === true && acceptingOrders === false) {
+    return "active_not_accepting_orders";
+  }
+  if (active === true) {
+    return "active";
+  }
+  return "inactive";
+}
+
+function normalizeNonNegativeNumber(value: unknown, fieldName: string) {
+  const numberValue = asNumber(value);
+  if (numberValue === null) {
+    return null;
+  }
+  if (numberValue < 0) {
+    throw new Error(`polymarket_market_${fieldName}_negative`);
+  }
+  return numberValue;
+}
+
+function normalizePolymarketMarketUrl(source: SourceWithConfig, item: Record<string, unknown>, sourceMarketId: string) {
+  const directUrl = asString(item.market_url) ?? asString(item.url);
+  if (directUrl) {
+    return directUrl;
+  }
+
+  const slug = asString(item.slug);
+  if (slug) {
+    return `https://polymarket.com/event/${slug}`;
+  }
+
+  const endpoint = source.source_url ?? defaultPolymarketMarketsUrl;
+  return `${endpoint}#${encodeURIComponent(sourceMarketId)}`;
+}
+
+function normalizePolymarketPriorItems(source: SourceWithConfig, items: Record<string, unknown>[]) {
+  const fetchedAt = new Date().toISOString();
+  const priors: NormalizedBeliefPrior[] = [];
+  for (const item of items) {
+    const sourceMarketId =
+      asString(item.id) ??
+      asString(item.conditionId) ??
+      asString(item.questionID);
+    if (!sourceMarketId) {
+      throw new Error(`polymarket_market_id_missing:${source.key}`);
+    }
+
+    const question = asString(item.question);
+    const title =
+      question ??
+      asString(item.title) ??
+      asString(item.groupItemTitle);
+    if (!title) {
+      throw new Error(`polymarket_market_title_missing:${source.key}:${sourceMarketId}`);
+    }
+
+    const outcomes = parseStringArray(item.outcomes, "outcomes");
+    const prices = parseProbabilityArray(item.outcomePrices, "outcome_prices");
+    const tokens = parseStringArray(item.clobTokenIds, "clob_token_ids");
+    if (outcomes.length === 0) {
+      throw new Error(`polymarket_market_outcomes_missing:${source.key}:${sourceMarketId}`);
+    }
+    if (outcomes.length !== prices.length) {
+      throw new Error(`polymarket_market_outcome_price_length_mismatch:${source.key}:${sourceMarketId}`);
+    }
+    if (tokens.length > 0 && tokens.length !== outcomes.length) {
+      throw new Error(`polymarket_market_token_length_mismatch:${source.key}:${sourceMarketId}`);
+    }
+
+    const effectiveAt =
+      normalizeTimestamp(item.updatedAt) ??
+      normalizeTimestamp(item.createdAt) ??
+      fetchedAt;
+    const endTime = normalizeTimestamp(item.endDate) ?? normalizeTimestamp(item.endDateIso);
+    const closeTime = normalizeTimestamp(item.closeTime) ?? endTime;
+    const marketUrl = normalizePolymarketMarketUrl(source, item, sourceMarketId);
+    const status = normalizePolymarketMarketStatus(item);
+    const liquidity =
+      normalizeNonNegativeNumber(item.liquidityNum, "liquidity") ??
+      normalizeNonNegativeNumber(item.liquidityClob, "liquidity") ??
+      normalizeNonNegativeNumber(item.liquidity, "liquidity");
+    const volume =
+      normalizeNonNegativeNumber(item.volumeNum, "volume") ??
+      normalizeNonNegativeNumber(item.volumeClob, "volume") ??
+      normalizeNonNegativeNumber(item.volume, "volume");
+    const bestBid = normalizeNonNegativeNumber(item.bestBid, "best_bid");
+    const bestAsk = normalizeNonNegativeNumber(item.bestAsk, "best_ask");
+    const lastTradePrice = normalizeNonNegativeNumber(item.lastTradePrice, "last_trade_price");
+    const rawPayload = ensureObjectPayload(item);
+    const provenance = {
+      adapter: source.adapter,
+      source_key: source.key,
+      world_input_source_id: source.id,
+      source_url: source.source_url ?? defaultPolymarketMarketsUrl,
+      external_source: "polymarket",
+      external_api: "gamma-markets",
+    };
+
+    outcomes.forEach((outcomeName, index) => {
+      const tokenId = tokens[index] ?? `${sourceMarketId}:${index}`;
+      priors.push({
+        source_market_id: sourceMarketId,
+        source_market_slug: asString(item.slug),
+        market_url: marketUrl,
+        title,
+        question,
+        description: asString(item.description),
+        category: asString(item.category),
+        status,
+        close_time: closeTime,
+        end_time: endTime,
+        outcome_id: tokenId,
+        outcome_name: outcomeName,
+        probability: prices[index],
+        liquidity,
+        volume,
+        best_bid: bestBid,
+        best_ask: bestAsk,
+        last_trade_price: lastTradePrice,
+        outcomes,
+        tokens,
+        prices,
+        raw_payload: rawPayload,
+        provenance,
+        fetched_at: fetchedAt,
+        effective_at: effectiveAt,
+      });
+    });
+  }
+
+  return priors;
+}
+
 async function fetchSourceItems(source: SourceWithConfig): Promise<SourcePollResult> {
   switch (source.adapter) {
+    case "polymarket_markets":
+      return fetchPolymarketMarketItems(source);
     case "market_internal":
       return {
         items: [],
@@ -1370,11 +2055,27 @@ async function pollSource(source: SourceWithConfig) {
   let metadata: Record<string, unknown> = {};
   try {
     const result = await fetchSourceItems(source);
-    const expandedItems = expandSourceItems(source, result.items);
+    if (isBeliefPriorAdapter(source.adapter)) {
+      fetchedCount = result.items.length;
+      const persisted = await persistBeliefPriors(source, result.items);
+      acceptedCount = persisted.accepted_count;
+      metadata = {
+        ...result.metadata,
+        stored_prior_count: persisted.prior_count,
+        stored_market_count: persisted.market_count,
+        stored_snapshot_count: persisted.accepted_count,
+      };
+      await updateSourceOnSuccess(source, result.next_cursor);
+      await finishRunRecord(runId, "succeeded", fetchedCount, acceptedCount, null, metadata);
+      return;
+    }
+
+    const signalSource = source as SignalSourceWithConfig;
+    const expandedItems = expandSourceItems(signalSource, result.items);
     fetchedCount = expandedItems.length;
     metadata = result.metadata;
     for (const rawItem of expandedItems) {
-      const signal = normalizeSignalFromItem(source, rawItem);
+      const signal = normalizeSignalFromItem(signalSource, rawItem);
       const inserted = await upsertSignal(signal);
       if (inserted) {
         acceptedCount += 1;
@@ -1399,7 +2100,7 @@ async function maybeBootstrapSourcesFromEnv() {
       continue;
     }
     const entry = { ...(candidate as Record<string, unknown>) };
-    const validation = validateWorldInputSourceConfig(entry);
+    const validation = validateSourceConfig(entry);
     if (!validation.ok) {
       app.log.warn({ key: entry.key }, `invalid_bootstrap_world_input_source:${validation.errors.join(",")}`);
       continue;
@@ -1572,6 +2273,59 @@ app.get("/v1/internal/world-signals", async (request) => {
   };
 });
 
+app.get("/v1/internal/belief-priors/snapshots", async (request) => {
+  const query = request.query as { limit?: string; source_key?: string; source_market_id?: string };
+  const limit = Math.max(1, Math.min(500, Number(query.limit ?? "100") || 100));
+  const sourceKey = asString(query.source_key);
+  const sourceMarketId = asString(query.source_market_id);
+  const result = await pool.query<BeliefPriorSnapshotRow>(
+    `
+      SELECT
+        snapshots.*,
+        sources.key AS source_key,
+        sources.adapter AS source_adapter,
+        refs.market_url AS market_url,
+        refs.title AS market_title
+      FROM belief_prior_snapshots snapshots
+      JOIN belief_sources sources ON sources.id = snapshots.belief_source_id
+      JOIN external_market_refs refs ON refs.id = snapshots.external_market_ref_id
+      WHERE ($2::text IS NULL OR sources.key = $2)
+        AND ($3::text IS NULL OR snapshots.source_market_id = $3)
+      ORDER BY snapshots.fetched_at DESC, snapshots.id DESC
+      LIMIT $1
+    `,
+    [limit, sourceKey, sourceMarketId],
+  );
+
+  return {
+    items: result.rows.map(mapBeliefPriorSnapshotRow),
+  };
+});
+
+app.get("/v1/internal/external-market-refs", async (request) => {
+  const query = request.query as { limit?: string; source_key?: string };
+  const limit = Math.max(1, Math.min(500, Number(query.limit ?? "100") || 100));
+  const sourceKey = asString(query.source_key);
+  const result = await pool.query<ExternalMarketRefRow>(
+    `
+      SELECT
+        refs.*,
+        sources.key AS source_key,
+        sources.adapter AS source_adapter
+      FROM external_market_refs refs
+      JOIN belief_sources sources ON sources.id = refs.belief_source_id
+      WHERE ($2::text IS NULL OR sources.key = $2)
+      ORDER BY refs.last_seen_at DESC, refs.id DESC
+      LIMIT $1
+    `,
+    [limit, sourceKey],
+  );
+
+  return {
+    items: result.rows.map(mapExternalMarketRefRow),
+  };
+});
+
 app.get("/v1/internal/world-input/sources", async (request) => {
   const limit = Math.max(1, Math.min(200, Number((request.query as { limit?: string }).limit ?? "100") || 100));
   const result = await pool.query<WorldInputSourceRow>(
@@ -1590,7 +2344,7 @@ app.get("/v1/internal/world-input/sources", async (request) => {
 
 app.post("/v1/internal/world-input/sources", async (request, reply) => {
   const body = ensureObjectPayload(request.body);
-  const sourceConfigValidation = validateWorldInputSourceConfig(body);
+  const sourceConfigValidation = validateSourceConfig(body);
   if (!sourceConfigValidation.ok) {
     return reply.code(400).send({ error: "invalid_source_config", details: sourceConfigValidation.errors });
   }
@@ -1674,12 +2428,12 @@ app.patch("/v1/internal/world-input/sources/:id", async (request, reply) => {
   const candidateForValidation: Record<string, unknown> = {
     key: asString(body.key) ?? existing.key,
     adapter: asString(body.adapter) ?? existing.adapter,
-    url: asString(body.url) ?? existing.source_url,
+    url: asString(body.url) ?? asString(body.source_url) ?? existing.source_url,
     poll_interval_seconds: asNumber(body.poll_interval_seconds) ?? existing.poll_interval_seconds,
     trust_tier: asString(body.trust_tier) ?? existing.trust_tier,
     ...mergedConfigPayload,
   };
-  const validation = validateWorldInputSourceConfig(candidateForValidation);
+  const validation = validateSourceConfig(candidateForValidation);
   if (!validation.ok) {
     return reply.code(400).send({ error: "invalid_source_config", details: validation.errors });
   }
@@ -1736,8 +2490,26 @@ app.post("/v1/internal/world-input/sources/:id/test", async (request, reply) => 
   const maxSample = Math.max(1, Math.min(10, Number((request.query as { sample?: string }).sample ?? "3")));
   try {
     const result = await fetchSourceItems(source);
-    const expandedItems = expandSourceItems(source, result.items);
-    const sampleSignals = expandedItems.slice(0, maxSample).map((item) => normalizeSignalFromItem(source, item));
+    if (isBeliefPriorAdapter(source.adapter)) {
+      const sampleBeliefPriors = normalizePolymarketPriorItems(
+        {
+          ...source,
+          source_url: resolvePolymarketMarketsUrl(source),
+        },
+        result.items,
+      ).slice(0, maxSample);
+      const response: SourceTestResponse = {
+        source,
+        fetched_count: result.items.length,
+        next_cursor: result.next_cursor,
+        sample_belief_priors: sampleBeliefPriors,
+      };
+      return response;
+    }
+
+    const signalSource = source as SignalSourceWithConfig;
+    const expandedItems = expandSourceItems(signalSource, result.items);
+    const sampleSignals = expandedItems.slice(0, maxSample).map((item) => normalizeSignalFromItem(signalSource, item));
     const response: SourceTestResponse = {
       source,
       fetched_count: expandedItems.length,

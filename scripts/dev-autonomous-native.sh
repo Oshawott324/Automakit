@@ -76,4 +76,5 @@ for i in $(seq 1 60); do
 done
 
 echo "Starting autonomous backend services (pnpm dev) with native runtime ..."
+export AUTOMAKIT_DEV_PROFILE="${AUTOMAKIT_DEV_PROFILE:-market-automation}"
 pnpm dev

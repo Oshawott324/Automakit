@@ -7,6 +7,9 @@ import {
 } from "node:crypto";
 import Fastify from "fastify";
 
+// Projection/test liquidity helper only. Do not use this service as evidence of
+// live venue execution or as an input to live promotion without release-gate verification.
+
 type AgentAuth = {
   id: string;
   token: string;

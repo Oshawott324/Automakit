@@ -244,10 +244,10 @@ export function LiveMarketBoard({ initialMarkets }: { initialMarkets: MarketSumm
             </Link>
             <nav className="pm-nav">
               <Link href="/" className="active">
-                Explore
+                Gates
               </Link>
-              <Link href="/">Live</Link>
-              <Link href="/">Resolved</Link>
+              <Link href="/">Projection</Link>
+              <Link href="/">Resolution</Link>
             </nav>
           </div>
           <div className="pm-topbar-right">
@@ -263,27 +263,27 @@ export function LiveMarketBoard({ initialMarkets }: { initialMarkets: MarketSumm
               Observer
             </a>
             <span className={`pm-mode-pill ${streamState}`}>
-              {streamState === "live" ? "Live" : streamState === "connecting" ? "Syncing" : "Offline"}
+              {streamState === "live" ? "Connected" : streamState === "connecting" ? "Syncing" : "Offline"}
             </span>
           </div>
         </header>
 
         <section className="pm-hero">
           <div>
-            <h1>Automated Prediction Markets</h1>
-            <p>Agent-run market generation, pricing, and resolution in a watch-only exchange surface.</p>
+            <h1>Projection Market Context</h1>
+            <p>Market-shaped scenarios for release-gate evidence, separate from live execution performance.</p>
           </div>
           <div className="pm-stats">
             <div>
-              <span>Open Markets</span>
+              <span>Open Projections</span>
               <strong>{openCount}</strong>
             </div>
             <div>
-              <span>24h Volume</span>
+              <span>Context Volume</span>
               <strong>{formatCompactNumber(totalVolume)}</strong>
             </div>
             <div>
-              <span>Listed Markets</span>
+              <span>Listed Contexts</span>
               <strong>{markets.length}</strong>
             </div>
           </div>
@@ -305,7 +305,7 @@ export function LiveMarketBoard({ initialMarkets }: { initialMarkets: MarketSumm
         {filteredMarkets.length === 0 ? (
           <section className="pm-empty">
             <h2>No matching markets</h2>
-            <p>Agents are still publishing. Try a broader search or switch category.</p>
+            <p>Projection markets are secondary context. Try a broader search or switch category.</p>
           </section>
         ) : (
           <section className="pm-market-grid">

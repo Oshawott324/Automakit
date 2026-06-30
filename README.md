@@ -1,6 +1,8 @@
 # Automakit
 
-Automakit is an agent-first prediction market platform inspired by Polymarket. The product is designed for software agents to discover markets, trade, propose markets, publish markets, and participate in resolution workflows, while humans are limited to observing activity and outcomes.
+Automakit is an agent execution and release-gate layer for market-facing software agents. The product is designed to move agents from production-shaped projection runs into controlled live broker/exchange execution, with clear promotion artifacts, risk limits, and audit trails.
+
+Projection and paper execution are gate modes. They are not the product claim and must remain separate from live execution surfaces and rankings.
 
 ## Monorepo Layout
 
@@ -19,6 +21,7 @@ services/
   portfolio-service/
   proposal-agent/
   proposal-pipeline/
+  release-gate/
   resolution-collector/
   resolution-service/
   scenario-agent/
@@ -50,6 +53,8 @@ docs/
 - [Product Requirements Document](./docs/prd.md)
 - [System Architecture](./docs/architecture.md)
 - [Forecast-Emergence Architecture Plan](./docs/forecast-emergence-architecture.md)
+- [Release Gate Implementation Plan](./docs/release-gate-implementation-plan.md)
+- [Release Gate Cutover Strategy](./docs/release-gate-cutover-strategy.md)
 - [Agent Automation Roadmap](./docs/roadmap-agent-automation.md)
 - [Agent Operations](./docs/agent-operations.md)
 - [Agent Simulation Fabric Spec](./docs/world-model-implementation-spec.md)
@@ -69,7 +74,13 @@ pnpm dev:matching-engine
 Agent runtime networking and proxy configuration is documented in [Agent Operations](./docs/agent-operations.md).
 
 Core local infrastructure is defined in `infra/docker/docker-compose.yml`.
-`pnpm dev` loads `.env` automatically.
+`pnpm dev` loads `.env` automatically and starts the execution/gate profile by default: auth, agent gateway, market, portfolio, release gate, resolution, and streams.
+
+To run the market-automation mesh explicitly:
+
+```bash
+AUTOMAKIT_DEV_PROFILE=market-automation pnpm dev
+```
 
 To run the external Python simulation runtime boundary:
 
@@ -81,7 +92,7 @@ pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 4016
 ```
 
-To enable native CAMEL/Oasis simulation inside that runtime service:
+To enable native CAMEL/Oasis simulation inside that runtime service for market automation:
 
 ```bash
 cd services/simulation-runtime-py
@@ -90,6 +101,8 @@ pip install -r requirements-camel-oasis.txt
 export SIM_RUNTIME_ENABLE_CAMEL_OASIS=true
 export SIM_RUNTIME_CAMEL_OASIS_PLATFORM=twitter
 ```
+
+The Python simulation runtime is upstream belief infrastructure only. It is not a release-gate substitute, live-execution proof, or trading venue.
 
 For always-on autonomous operation (no manual `run-once` calls), use:
 
@@ -123,9 +136,11 @@ Core product state for agents, auth challenges, access tokens, proposals, market
 
 ## Current Implemented Flows
 
-- Autonomous market creation, publication, and deterministic resolution.
+- Production-readiness gate primitives for agent execution: release-gate snapshots, per-run rollout sandboxes, gateway tool-call ledgers, deterministic verifier checks, and promotion artifacts.
+- Signed agent execution path through `auth-registry`, `agent-gateway`, `portfolio-service`, `matching-engine`, and `stream-service`.
+- Autonomous market creation, publication, and deterministic resolution remain available as an explicit market-automation profile.
 - `market-creator` is disabled by default; market generation now runs through `world-input -> simulation-orchestrator -> world-model/scenario/synthesis -> approval-agent -> proposal-agent -> proposal-pipeline`.
-- Autonomous `trade-simulator` now runs belief-linked trading agents that place signed orders only on markets tied to synthesized beliefs.
+- `trade-simulator` is a projection/test liquidity helper only. It must not be treated as evidence of live venue execution.
 - Platform-owned `world-input`, `simulation-orchestrator`, `world-model`, `scenario-agent`, `synthesis-agent`, and `proposal-agent` services so market generation no longer depends only on external structured feeds.
 - Platform-owned deterministic facts layer (`world-input` + `event-builder`) so source ingestion and event clustering stay schema-driven without embedded market-generation heuristics.
 - `world-model`, `scenario-agent`, and `synthesis-agent` run with real OpenAI-compatible LLM calls by default (`LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL_NAME`).
@@ -147,13 +162,13 @@ Core product state for agents, auth challenges, access tokens, proposals, market
 - Resolution-service source adapters, immutable observations, typed payload validation, deterministic outcome derivation, quorum evaluation, and automatic quarantine.
 - Autonomous `resolution-collector` workers that poll eligible markets, claim collection jobs, fetch canonical sources, submit observations, and back off or quarantine automatically.
 
-The current trading path is real but still limited:
+The current execution path is production-shaped but still limited:
 
 - the matching engine reconstructs its in-memory books from persisted `order_events` on startup, but does not yet persist snapshots itself,
-- portfolio accounting is inventory-based and paper-trading only; there is no margin engine or shorting workflow yet.
+- portfolio accounting is inventory-based and currently backs projection/internal execution; live venue settlement adapters are still pending.
 - stream fanout is currently DB-poll based rather than using logical replication or a broker.
 - source adapter coverage includes `http_json`, `x_api_recent_search`, `reddit_api_subreddit_new`, and `news_rss`, but broader source types are still pending.
-- liquidity bootstrap is currently baseline belief-driven (`trade-simulator`), not strategy-aware market making.
+- liquidity bootstrap is currently baseline belief-driven (`trade-simulator`) and should stay out of live promotion decisions unless verified through the release gate.
 
 ## Live Test
 
@@ -264,7 +279,7 @@ Implemented risk checks currently include:
 - max exposure per category,
 - inventory-only sells when shorting is disabled.
 
-For paper-trading inventory bootstrap, the portfolio service also supports complete-set minting so agents can obtain both `YES` and `NO` inventory before selling.
+For projection inventory bootstrap, the portfolio service also supports complete-set minting so agents can obtain both `YES` and `NO` inventory before selling. This is a sandbox/projection affordance, not a live venue capability.
 
 ## WebSocket Streams
 
@@ -309,7 +324,7 @@ In anonymous mode, only public channels are allowed (`market.snapshot`, `orderbo
 - Binary `YES/NO` markets only in v1.
 - Agents are the only active actors in the trading protocol.
 - Humans only watch market activity and agent performance.
-- First release should use paper trading or internal balances, not real-money settlement.
+- First release must include a credible live-execution path behind release-gate promotion artifacts. Projection/internal balances may be used for gating and tests, but must remain visibly separate from live execution.
 
 ## Agent Role Model
 
@@ -412,10 +427,10 @@ The main missing role is platform-owned liquidity bootstrap:
 - designated liquidity agents are not yet a first-class service,
 - exchange hardening beyond replay-based recovery is still pending.
 
-The next major architecture addition is a runtime split:
+The next major market-automation addition is a runtime split:
 
 - keep deterministic contracts, persistence, and settlement in TypeScript services,
-- run richer world simulation in a dedicated Python runtime for CAMEL/Oasis compatibility,
+- run richer world simulation in a dedicated Python runtime for CAMEL/Oasis compatibility, upstream of release-gated execution,
 - keep approval-agent quorum as the hard gate before market publication.
 
 ## Polymarket-Parity Checklist (Agent-Only)

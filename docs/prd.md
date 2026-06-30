@@ -2,9 +2,9 @@
 
 ## 1. Summary
 
-Automakit is a prediction market platform where software agents are the only active participants. The product should preserve the familiar discovery and trading experience of Polymarket while introducing agent-native identity, permissions, treasury management, and activity visibility.
+Automakit is a release-gated execution platform for market-facing software agents. The product should preserve familiar market discovery, order-entry, portfolio, and resolution concepts while introducing agent-native identity, promotion artifacts, risk limits, broker/exchange adapters, and activity visibility.
 
-The initial release is a controlled beta for fully autonomous agent-vs-agent paper trading with automated market proposal generation, market publication, world-state synchronization, and market resolution.
+The initial release should prove a controlled path from production-shaped projection runs to live execution access. Paper/projection trading is a pre-production gate mode, not the product endpoint.
 
 ## 2. Problem
 
@@ -12,13 +12,13 @@ Existing prediction markets are built for humans. Bots can participate, but they
 
 - No standard identity and auth model for agents.
 - No native API contract for market discovery, streaming, and order entry across agent frameworks.
-- No safe market creation pipeline for agent-generated events.
+- No safe release gate that proves an agent/tool/model version can operate correctly before receiving live execution permissions.
 - No autonomous truth layer that can keep a simulated market synchronized to the real world.
 - No product UX focused on understanding which agents are trading, why, and how they perform.
 
 ## 3. Vision
 
-Create the default exchange layer for autonomous agents to express beliefs through markets. The system should separate platform-owned infrastructure agents from third-party participant agents.
+Create the default execution-control layer for autonomous agents to express beliefs through markets while enforcing production readiness before live broker/exchange writes. The system should separate platform-owned infrastructure agents from third-party participant agents, and should keep projection results separate from live execution results.
 
 Platform-owned agents should:
 
@@ -36,7 +36,7 @@ Third-party agents should be able to:
 
 - discover tradable markets,
 - allocate capital under risk constraints,
-- place and cancel orders programmatically,
+- place and cancel orders programmatically after passing release-gate scope checks,
 - attach rationales and evidence,
 - compete on performance and reputation.
 
@@ -60,6 +60,8 @@ Humans should be able to:
 
 - Deliver a Polymarket-like web experience for browsing markets and tracking activity.
 - Make agents first-class participants with a stable API and event stream.
+- Require projection-gate promotion artifacts before live execution scopes are granted.
+- Support at least one real broker/exchange adapter path behind explicit risk limits.
 - Keep third-party participation simple: trading first, richer roles later.
 - Build a reliable truth layer that keeps markets synchronized to real-world outcomes.
 - Use an agent-simulated belief layer for market generation.
@@ -79,7 +81,8 @@ Humans should be able to:
 
 - Permissionless public market creation in v1.
 - Complex derivatives, combinatorial markets, or parlay products.
-- Real-money public launch before paper-trading beta is stable.
+- Ungated live execution.
+- Treating paper/projection results as live venue performance.
 - Full decentralization or onchain settlement in the MVP.
 - Broad coverage of subjective or culturally ambiguous markets in v1.
 
@@ -112,7 +115,8 @@ Wants to create or connect agents, fund or configure them, and then monitor thei
 ### Trading model
 
 - Centralized offchain limit order book.
-- Internal balances or paper balances only.
+- Projection/internal balances for gate runs.
+- A live execution backend boundary for broker/exchange adapters, initially narrow and gated.
 - Immediate support for limit orders; market orders can be added after core matching is stable.
 
 ### Agent capabilities
@@ -138,20 +142,21 @@ Wants to create or connect agents, fund or configure them, and then monitor thei
 
 ### UI scope
 
-- Homepage/feed with category filters and trending markets.
-- Event page with market card, price chart, order book, recent trades, and rules.
-- Leaderboard for agents.
-- Agent profile page with PnL, positions, rationale feed, and recent activity.
-- Observer console for watch-only proposal and resolution timelines.
+- Homepage release-gate console with recent gate runs, verifier decisions, candidate versions, semantic facade versions, and promotion artifact status.
+- Promotion artifact view with approved scopes, expiry, risk limits, and live adapter eligibility.
+- Agent version view with release history, tool-call traces, verifier failures, and replay evidence.
+- Projection market detail pages as secondary context for execution tests.
+- Observer console for watch-only proposal, projection, and resolution timelines.
 
 ## 8. User Stories
 
 ### Agent trading
 
 - As an agent, I can request a market snapshot and receive order book updates over a stream.
-- As an agent, I can submit a signed limit order and receive an acknowledgment and later fill events.
+- As an agent, I can submit a signed limit order in projection and receive an acknowledgment and later fill events.
+- As an agent with a valid promotion artifact, I can submit live orders only within approved scopes and risk limits.
 - As an agent, I can cancel an outstanding order idempotently.
-- As an agent, I can inspect my current cash balance, positions, and realized/unrealized PnL.
+- As an agent, I can inspect projection and live balances, positions, fills, and PnL as explicitly separated execution-state views.
 
 ### Market creation
 
@@ -193,6 +198,8 @@ Wants to create or connect agents, fund or configure them, and then monitor thei
 ### FR-4 Order entry and cancellation
 
 - The system must accept signed order requests with idempotency keys.
+- The system must distinguish projection execution from live execution at the backend boundary.
+- The system must require a valid promotion artifact before any live write.
 - The system must validate risk and balance constraints before order acceptance.
 - The system must support explicit cancellation by `order_id` or `client_order_id`.
 
@@ -200,6 +207,15 @@ Wants to create or connect agents, fund or configure them, and then monitor thei
 
 - The system must track balances, positions, fills, and PnL.
 - The system must enforce system-configured risk limits, including max notional per market and max daily loss.
+- The system must keep projection balances/PnL separate from live venue balances/PnL.
+
+### FR-5A Release gate
+
+- The system must create production-shaped projection snapshots for candidate agent/tool/model versions.
+- The system must run isolated rollout sandboxes from those snapshots.
+- The system must record tool calls, state hashes, semantic events, verifier checks, and promotion artifacts.
+- The system must issue live scopes only through promotion artifacts with explicit risk limits and expiry.
+- The system must fail closed when promotion artifacts are missing, expired, or scope-incompatible.
 
 ### FR-6 Market creation pipeline
 
@@ -281,13 +297,13 @@ Wants to create or connect agents, fund or configure them, and then monitor thei
 
 ### Phase 1
 
-- Allowlisted beta with paper balances and OpenClaw integration.
+- Allowlisted beta with projection-gated promotion into a narrow OpenClaw live-adapter scope.
 - Focus on markets with highly machine-resolvable outcomes.
 - Platform-owned proposal and collector agents provide the first autonomous loops.
 
 ### Phase 2
 
-- Multi-framework beta with leaderboards, platform-owned world-model agents, and a mature world-sync and autonomous resolution layer.
+- Multi-framework beta with agent-version release history, platform-owned world-model agents, and a mature world-sync and autonomous resolution layer.
 
 ### Phase 3
 

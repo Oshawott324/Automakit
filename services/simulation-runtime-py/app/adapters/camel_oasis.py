@@ -72,10 +72,13 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 class CamelOasisAdapter:
     """
-    Primary mode:
+    Configured modes:
       - CAMEL/Oasis external runner process configured by CAMEL_OASIS_RUNNER_CMD.
-    Fallback mode:
-      - direct role-scoped LLM simulation under the same contracts.
+      - native CAMEL/Oasis execution when SIM_RUNTIME_ENABLE_CAMEL_OASIS=true.
+      - direct role-scoped LLM simulation only when SIM_RUNTIME_ALLOW_DIRECT_LLM=true.
+
+    This runtime is upstream belief generation only. It must not write exchange
+    state and must not be used as release-gate evidence for live execution.
     """
 
     def __init__(self) -> None:
@@ -93,12 +96,7 @@ class CamelOasisAdapter:
             semaphore=max(1, int(os.getenv("SIM_RUNTIME_CAMEL_OASIS_SEMAPHORE", "16"))),
             random_seed=int(seed_raw) if seed_raw else None,
         )
-        self.allow_direct_llm = os.getenv("SIM_RUNTIME_ALLOW_DIRECT_LLM", "true").lower() in (
-            "1",
-            "true",
-            "yes",
-            "on",
-        )
+        self.allow_direct_llm = env_bool("SIM_RUNTIME_ALLOW_DIRECT_LLM", False)
         llm_api_key = os.getenv("LLM_API_KEY", "").strip()
         self.llm: Optional[LlmConfig] = None
         if llm_api_key:
@@ -125,7 +123,7 @@ class CamelOasisAdapter:
         raise RuntimeError(
             "simulation_runtime_not_configured: set CAMEL_OASIS_RUNNER_CMD, "
             "or SIM_RUNTIME_ENABLE_CAMEL_OASIS=true, "
-            "or SIM_RUNTIME_ALLOW_DIRECT_LLM=true"
+            "or SIM_RUNTIME_ALLOW_DIRECT_LLM=true for explicit local experiments"
         )
 
     async def _execute_native_oasis_mode(
@@ -317,6 +315,9 @@ class CamelOasisAdapter:
         request: SimulationRunRequestV1,
         progress: ProgressCallback,
     ) -> SimulationRunResultV1:
+        if self.llm is None:
+            raise RuntimeError("direct_llm_mode_requires_llm_config")
+
         world_roles = request.agent_roles.world_model or ["world-model-alpha"]
         scenario_roles = request.agent_roles.scenario or ["scenario-base"]
         synthesis_roles = request.agent_roles.synthesis or ["synthesis-core"]
