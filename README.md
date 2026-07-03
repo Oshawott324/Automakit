@@ -55,6 +55,7 @@ docs/
 - [Forecast-Emergence Architecture Plan](./docs/forecast-emergence-architecture.md)
 - [Release Gate Implementation Plan](./docs/release-gate-implementation-plan.md)
 - [Release Gate Cutover Strategy](./docs/release-gate-cutover-strategy.md)
+- [Agent Env And Arena Implementation Plan](./docs/agent-arena-implementation-plan.md)
 - [Agent Automation Roadmap](./docs/roadmap-agent-automation.md)
 - [Agent Operations](./docs/agent-operations.md)
 - [Agent Simulation Fabric Spec](./docs/world-model-implementation-spec.md)
