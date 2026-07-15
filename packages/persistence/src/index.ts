@@ -323,6 +323,133 @@ export async function ensureCoreSchema(pool: Pool) {
     CREATE INDEX IF NOT EXISTS idx_belief_prior_snapshots_outcome_fetched
       ON belief_prior_snapshots (source_market_id, outcome_id, fetched_at DESC);
 
+    CREATE TABLE IF NOT EXISTS overnight_case_bundles (
+      id TEXT PRIMARY KEY,
+      case_date DATE NOT NULL UNIQUE,
+      case_key TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL,
+      close_captured_at TIMESTAMPTZ NOT NULL,
+      artifact_root TEXT NOT NULL,
+      manifest_path TEXT NOT NULL,
+      manifest_hash TEXT NOT NULL,
+      source_snapshot_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+      market_universe_ref TEXT NOT NULL,
+      belief_prior_ref TEXT NOT NULL,
+      scenario_ensemble_ref TEXT,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_overnight_case_bundles_status_date
+      ON overnight_case_bundles (status, case_date DESC);
+
+    CREATE TABLE IF NOT EXISTS overnight_scenarios (
+      id TEXT PRIMARY KEY,
+      case_bundle_id TEXT NOT NULL REFERENCES overnight_case_bundles(id) ON DELETE CASCADE,
+      scenario_key TEXT NOT NULL,
+      scenario_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+      scenario_ref TEXT NOT NULL,
+      scenario_hash TEXT NOT NULL,
+      probability DOUBLE PRECISION NOT NULL,
+      manifest JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL,
+      UNIQUE (case_bundle_id, scenario_key)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_overnight_scenarios_case_bundle
+      ON overnight_scenarios (case_bundle_id);
+
+    CREATE TABLE IF NOT EXISTS overnight_sandbox_runs (
+      id TEXT PRIMARY KEY,
+      case_bundle_id TEXT NOT NULL REFERENCES overnight_case_bundles(id) ON DELETE CASCADE,
+      run_key TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL,
+      execution_mode TEXT NOT NULL,
+      sandbox_manifest JSONB NOT NULL DEFAULT '{}'::jsonb,
+      started_at TIMESTAMPTZ,
+      completed_at TIMESTAMPTZ,
+      failure_reason TEXT,
+      created_at TIMESTAMPTZ NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_overnight_sandbox_runs_case_status
+      ON overnight_sandbox_runs (case_bundle_id, status, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS overnight_agent_runs (
+      id TEXT PRIMARY KEY,
+      sandbox_run_id TEXT NOT NULL REFERENCES overnight_sandbox_runs(id) ON DELETE CASCADE,
+      participant_agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+      participant_version TEXT NOT NULL,
+      status TEXT NOT NULL,
+      starting_cash DOUBLE PRECISION NOT NULL,
+      sandbox_portfolio_ref TEXT,
+      action_trace_ref TEXT,
+      scorecard_id TEXT,
+      started_at TIMESTAMPTZ,
+      completed_at TIMESTAMPTZ,
+      failure_reason TEXT,
+      created_at TIMESTAMPTZ NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_overnight_agent_runs_sandbox_status
+      ON overnight_agent_runs (sandbox_run_id, status, created_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_overnight_agent_runs_participant_date
+      ON overnight_agent_runs (participant_agent_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS overnight_scorecards (
+      id TEXT PRIMARY KEY,
+      sandbox_run_id TEXT NOT NULL REFERENCES overnight_sandbox_runs(id) ON DELETE CASCADE,
+      agent_run_id TEXT REFERENCES overnight_agent_runs(id) ON DELETE SET NULL,
+      case_bundle_id TEXT NOT NULL REFERENCES overnight_case_bundles(id) ON DELETE CASCADE,
+      score_total DOUBLE PRECISION,
+      score_dimensions JSONB NOT NULL DEFAULT '{}'::jsonb,
+      hard_failures JSONB NOT NULL DEFAULT '[]'::jsonb,
+      soft_failures JSONB NOT NULL DEFAULT '[]'::jsonb,
+      verifier_version TEXT NOT NULL,
+      input_manifest_hash TEXT NOT NULL,
+      scenario_hashes JSONB NOT NULL DEFAULT '[]'::jsonb,
+      market_impact_label TEXT NOT NULL,
+      live_claim BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_overnight_scorecards_case_created
+      ON overnight_scorecards (case_bundle_id, created_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_overnight_scorecards_agent_run
+      ON overnight_scorecards (agent_run_id);
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'overnight_agent_runs_scorecard_fk'
+      ) THEN
+        ALTER TABLE overnight_agent_runs
+          ADD CONSTRAINT overnight_agent_runs_scorecard_fk
+          FOREIGN KEY (scorecard_id) REFERENCES overnight_scorecards(id) ON DELETE SET NULL;
+      END IF;
+    END $$;
+
+    CREATE TABLE IF NOT EXISTS overnight_settlements (
+      id TEXT PRIMARY KEY,
+      case_bundle_id TEXT NOT NULL REFERENCES overnight_case_bundles(id) ON DELETE CASCADE,
+      settlement_key TEXT NOT NULL UNIQUE,
+      actual_data_ref TEXT NOT NULL,
+      actual_data_hash TEXT NOT NULL,
+      settlement_manifest JSONB NOT NULL DEFAULT '{}'::jsonb,
+      settled_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_overnight_settlements_case_settled
+      ON overnight_settlements (case_bundle_id, settled_at DESC);
+
     CREATE TABLE IF NOT EXISTS simulation_runs (
       id TEXT PRIMARY KEY,
       run_type TEXT NOT NULL,

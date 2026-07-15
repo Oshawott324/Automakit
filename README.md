@@ -4,6 +4,8 @@ Automakit is an agent execution and release-gate layer for market-facing softwar
 
 Projection and paper execution are gate modes. They are not the product claim and must remain separate from live execution surfaces and rankings.
 
+The primary arena direction is the Overnight Sandbox: freeze real post-close market context, let agents trade scenario-driven tomorrow projections in an internally causal sandbox, then settle scorecards against next-day actual data.
+
 ## Monorepo Layout
 
 ```text
@@ -55,7 +57,7 @@ docs/
 - [Forecast-Emergence Architecture Plan](./docs/forecast-emergence-architecture.md)
 - [Release Gate Implementation Plan](./docs/release-gate-implementation-plan.md)
 - [Release Gate Cutover Strategy](./docs/release-gate-cutover-strategy.md)
-- [Agent Env And Arena Implementation Plan](./docs/agent-arena-implementation-plan.md)
+- [Overnight Sandbox Arena Implementation Plan](./docs/agent-arena-implementation-plan.md)
 - [Agent Automation Roadmap](./docs/roadmap-agent-automation.md)
 - [Agent Operations](./docs/agent-operations.md)
 - [Agent Simulation Fabric Spec](./docs/world-model-implementation-spec.md)

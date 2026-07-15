@@ -1,129 +1,192 @@
-# Agent Env And Arena Implementation Plan
+# Overnight Sandbox Arena Implementation Plan
 
 ## 1. Decision
 
-Automakit should be both:
+Automakit should make `overnight_sandbox` the primary arena regime.
 
-- an agent execution environment for finding tool-call, state, risk, and market-reasoning errors;
-- an arena protocol for comparing agents under explicit, reproducible evaluation regimes.
+The core product loop is:
 
-The environment is the substrate. The arena is the comparative product built on that substrate.
+```text
+market close at T0
+  -> freeze today's real market and world data
+  -> create an immutable daily case bundle
+  -> generate a tomorrow scenario ensemble
+  -> run many agents inside an internally causal sandbox
+  -> collect trades, tool calls, traces, and scorecards
+  -> ingest actual T1 data when it arrives
+  -> settle the case and update rankings / release-gate evidence
+```
 
-The arena must not claim that live-synced paper trading is real trading performance. Paper orders either:
+This is both an agent environment and an arena:
 
-- do not affect the live market tape,
-- affect only a simulated book that diverges from live,
-- or become actual live orders.
+- the environment lets agents find tool-call, state, risk, and market-reasoning errors;
+- the arena compares agents and versions under a declared, repeatable daily case.
 
-There is no honest mode where paper orders stay synced to live markets and also causally affect those live markets.
+The previous regimes still matter, but they are subordinate:
 
-## 2. Product Claim
+- `tool_call_gym` is the preflight contract suite for agent tool correctness;
+- `replay_market` supplies fixed historical tapes and regression cases;
+- `shadow_live` captures current context for later daily bundles;
+- `impact_projection` is the market-impact engine inside the overnight sandbox;
+- `tiny_notional_live` is the promoted live-execution path after the sandbox and release gate.
+
+## 2. Why Overnight Sandbox Is Primary
+
+Live-paper trading has a causality problem.
+
+Paper orders can either:
+
+- not affect the live market tape;
+- affect only a simulated market that diverges from live;
+- or become real orders that affect the real venue.
+
+There is no honest mode where fake orders both stay synced to the live market and causally affect it.
+
+The overnight sandbox avoids this contradiction. After close, Automakit does not claim to be live-synced. It freezes real data as of `T0`, creates plausible tomorrow paths, and lets agents trade inside a causal internal environment. When actual `T1` data arrives, the system scores forecasts, behavior, and risk discipline against reality.
+
+## 3. Product Claim
 
 Automakit should claim:
 
-> We evaluate whether market-facing agents can safely and correctly use production-shaped trading tools under realistic market scenarios, then promote qualified agents into controlled live execution.
+> We freeze real post-close market context, run market-facing agents through production-shaped overnight sandbox cases, then score their tool correctness, risk behavior, forecasts, and execution discipline against next-day reality.
 
 Automakit should not claim:
 
-> Agents ranked by projection PnL are proven live traders.
+> Agents ranked by fake balances or live-synced paper PnL are proven live traders.
 
-Projection PnL can be one diagnostic metric, but only inside a clearly labeled evaluation regime.
+Sandbox PnL is useful only as one score dimension under an explicit case, scenario set, and market-impact label.
 
-## 3. User Needs
+## 4. Primary Regime: `overnight_sandbox`
 
-### Agent builders
+Required label:
 
-They need a place where an agent can discover and fix:
+```text
+regime: overnight_sandbox
+input_data: frozen_after_close
+future_data: scenario_ensemble
+market_impact: simulated
+settlement: next_day_actuals
+live_claim: false
+```
 
-- malformed tool calls,
-- duplicate orders,
-- stale state assumptions,
-- incorrect balance and reserve logic,
-- bad cancel handling,
-- partial-fill mistakes,
-- exposure-limit violations,
-- confusion between projection and live execution,
-- brittle behavior after tool errors.
+### 4.1 Inputs
 
-The primary artifact for them is a debug report and replayable trace.
+The case builder freezes data after market close:
 
-### Model and agent evaluators
+- external market refs from Polymarket, Kalshi, odds, broker data, or other sources;
+- belief prior snapshots and probability histories;
+- orderbook snapshots where available;
+- close prices and volume;
+- relevant news, filings, macro data, social signals, and resolution evidence;
+- source hashes and provenance.
 
-They need comparable rankings across agents and versions.
+External markets are not mirrored as Automakit markets by default. They are source fixtures and priors for a daily case.
 
-The primary artifact for them is an arena scorecard with regime, suite version, case hashes, and verifier results.
+### 4.2 Case Bundle
 
-### Capital owners and operators
+Each case bundle is an immutable filesystem artifact with a database row pointing at it.
 
-They need evidence before granting live permissions.
+Initial local layout:
 
-The primary artifact for them is a promotion decision with risk scopes, expiry, and rollback path.
+```text
+.automakit/overnight-cases/2026-07-15/
+  manifest.json
+  source-snapshots/
+    polymarket.json
+    kalshi.json
+    news.json
+    macro.json
+  belief-priors.json
+  market-universe.json
+  scenario-ensemble.json
+  hidden-verifier-manifest.json
+  settlement/
+    actual-data.json
+    settlement-manifest.json
+```
 
-### Venue and broker partners
+The manifest hash is the canonical input identity for reproducibility.
 
-They need assurance that order flow is controlled.
+### 4.3 Scenario Ensemble
 
-The primary artifact for them is an auditable chain from arena run to release gate to promotion artifact to live adapter.
+Mock tomorrow data is not truth. It is a scenario ensemble.
 
-## 4. Evaluation Regimes
+Scenario agents generate multiple plausible `T1` paths from the frozen `T0` bundle:
 
-Leaderboards must never mix regimes. Every score must declare its regime.
+- probability shifts;
+- price moves;
+- liquidity and spread shocks;
+- event updates;
+- resolution events;
+- news shocks;
+- confidence and rationale;
+- source evidence refs.
 
-### 4.1 Tool-Call Gym
+Each scenario has:
 
-Purpose: test whether an agent can use tools correctly.
+- `scenario_key`;
+- artifact ref;
+- hash;
+- probability;
+- generator agent id when applicable;
+- typed manifest.
 
-Inputs:
+The sandbox can run one agent across many scenarios or many agents inside one scenario. Scorecards must record the scenario hashes used.
 
-- synthetic but production-shaped portfolios,
-- orderbooks,
-- market metadata,
-- stale data cases,
-- auth and permission cases,
-- tool failure cases.
+### 4.4 Sandbox Execution
 
-Execution:
+Agents trade against internal books seeded from the frozen bundle and selected scenario paths.
 
-- agent calls the same gateway tools used in production;
-- verifiers inspect tool coverage, ordering, arguments, state hashes, and risk outcomes.
+Within the sandbox:
 
-Scores:
+- orders affect simulated prices;
+- balances, positions, reservations, fills, cancels, and fees are fake but production-shaped;
+- tool calls go through the same agent gateway contracts used by release-gate runs;
+- all state-changing calls produce trace refs and state hashes;
+- no live venue write is possible in this regime.
 
-- tool validity rate,
-- required-tool coverage,
-- state-hash coverage,
-- idempotency behavior,
-- risk violation count,
-- recovery after denied writes,
-- replay determinism.
+The sandbox is allowed to diverge from live markets after the first simulated fill. That divergence is part of the regime, not a bug.
 
-This is the first regime to build.
+### 4.5 Settlement
 
-### 4.2 Replay Market Arena
+When actual next-day data arrives, Automakit creates an `overnight_settlements` row and settlement artifact.
 
-Purpose: compare market reasoning and execution choices on identical market tapes.
+Settlement scores:
 
-Inputs:
+- forecast calibration against actual outcomes;
+- directional accuracy;
+- risk-adjusted sandbox PnL;
+- drawdown and exposure discipline;
+- tool-call validity;
+- stale-data handling;
+- robustness across the scenario ensemble;
+- disagreement quality and convergence behavior.
 
-- historical Polymarket/Kalshi/orderbook snapshots,
-- external probability histories,
-- news and resolution evidence,
-- fixed start and end windows.
+## 5. Supporting Regimes
 
-Execution:
+Leaderboards must never mix regimes. Every score must declare its regime and market-impact label.
 
-- each agent receives the same tape;
-- paper orders execute against a declared fill model;
-- agent actions do not alter the source tape.
+### 5.1 `tool_call_gym`
 
-Scores:
+Purpose: preflight agents before overnight runs.
 
-- calibration score,
-- no-impact counterfactual PnL,
-- slippage under declared fill assumptions,
-- order discipline,
-- risk-adjusted exposure,
-- post-resolution correctness.
+It tests:
+
+- malformed order requests;
+- duplicate idempotency keys;
+- partial fill then cancel;
+- stale portfolio state;
+- denied live writes without promotion artifacts;
+- risk limit breach;
+- stream replay after disconnect.
+
+Tool-call gym can produce release-gate evidence, but it does not evaluate market skill.
+
+### 5.2 `replay_market`
+
+Purpose: regression on fixed historical tapes.
+
+It uses immutable historical source snapshots and no-impact paper fills. It is useful for replaying failures from prior overnight cases and for comparing versions on identical data.
 
 Required label:
 
@@ -133,30 +196,11 @@ market_impact: none
 live_claim: false
 ```
 
-### 4.3 Shadow-Live Arena
+### 5.3 `shadow_live`
 
-Purpose: evaluate agents on current live market context without sending orders.
+Purpose: capture current live context without writing orders.
 
-Inputs:
-
-- current external market priors,
-- current orderbook snapshots where available,
-- current news and event feeds.
-
-Execution:
-
-- agents make decisions in real time;
-- proposed orders are captured but not sent to venues;
-- verifiers score tool use immediately;
-- market reasoning scores finalize only after future resolution or replay window close.
-
-Scores:
-
-- live-context tool correctness,
-- stale-data handling,
-- latency budget adherence,
-- forecast calibration after outcome,
-- counterfactual execution quality under declared assumptions.
+Shadow-live should mainly feed future overnight bundles. It can record proposed actions in real time, but those actions are counterfactual and must not be ranked as live PnL.
 
 Required label:
 
@@ -166,30 +210,11 @@ market_impact: none
 live_claim: false
 ```
 
-### 4.4 Impact Projection Arena
+### 5.4 `impact_projection`
 
-Purpose: evaluate multi-agent interaction and market-impact behavior.
+Purpose: provide the internally causal market-impact engine.
 
-Inputs:
-
-- simulated books seeded from external priors,
-- liquidity curves,
-- venue-specific fee models,
-- scenario shocks.
-
-Execution:
-
-- agents trade in the same simulated market;
-- their orders affect simulated prices and other agents' opportunity sets;
-- the simulated market is allowed to diverge from live markets.
-
-Scores:
-
-- endogenous projection PnL,
-- inventory discipline,
-- manipulation resistance,
-- liquidity provision quality,
-- robustness to adversarial flow.
+This regime is still useful as a standalone stress test, but its primary role is inside `overnight_sandbox`.
 
 Required label:
 
@@ -199,31 +224,11 @@ market_impact: simulated
 live_claim: false
 ```
 
-### 4.5 Tiny-Notional Live Arena
+### 5.5 `tiny_notional_live`
 
 Purpose: produce causally real live-execution evidence under strict limits.
 
-Inputs:
-
-- real broker/exchange adapter,
-- real venue state,
-- approved promotion artifact,
-- strict notional and order limits.
-
-Execution:
-
-- only promoted agents can enter;
-- orders are real;
-- market impact is real;
-- every live write requires a scoped promotion artifact.
-
-Scores:
-
-- realized live PnL,
-- real fill quality,
-- compliance with live risk limits,
-- kill-switch behavior,
-- operational stability.
+Only promoted agents can enter. Every live write requires a scoped promotion artifact and a real broker/exchange adapter.
 
 Required label:
 
@@ -233,416 +238,385 @@ market_impact: real
 live_claim: true
 ```
 
-## 5. Architecture
+## 6. Architecture
 
 ```text
-external priors / market tapes / news / odds
+external sources
   -> belief-prior intake
-  -> arena case builder
-  -> arena service
+  -> overnight case builder
+  -> immutable case bundle
+  -> scenario agents
+  -> scenario ensemble
+  -> overnight sandbox service
   -> agent gateway
-  -> execution backend
-       projection replay
-       shadow live
-       impact projection
-       tiny-notional live
-  -> verifier service
-  -> scorecard
-  -> release gate
+  -> projection execution backend
+  -> deterministic verifier
+  -> overnight scorecards
+  -> next-day settlement
+  -> release gate evidence
   -> promotion artifact
-  -> live adapter
+  -> tiny-notional live adapter
 ```
 
-### 5.1 `arena-service`
+### 6.1 `overnight-arena` service
 
-New service responsible for:
+New service responsibility:
 
-- suite creation,
-- case registration,
-- run scheduling,
-- agent enrollment,
-- execution-regime selection,
-- scorecard aggregation,
-- leaderboard publishing.
+- build and register daily case bundles;
+- generate scenario ensembles through scenario agents;
+- schedule sandbox runs;
+- enroll participant agents and versions;
+- persist run metadata and artifact refs;
+- call verifier workers;
+- publish scorecards and settlement status.
 
-It should not contain market logic or agent reasoning logic.
+The service orchestrates. It should not contain strategy logic.
 
-### 5.2 `arena-case-builder`
+### 6.2 Case builder
 
-Can start inside `arena-service`, then split later if needed.
-
-Responsibilities:
-
-- convert belief priors and external market refs into replay cases;
-- bind each case to immutable input hashes;
-- generate tool-call gym cases from production-shaped fixtures;
-- create hidden verifier manifests.
-
-It must not mirror external markets as Automakit markets by default.
-
-### 5.3 `verifier`
-
-The verifier should remain deterministic.
+The case builder should be deterministic after source capture.
 
 Responsibilities:
 
-- inspect tool-call events,
-- inspect before and after state hashes,
-- inspect order, fill, cancel, portfolio, and stream events,
-- compute assertion results,
-- emit scorecards.
+- read belief priors and external market refs;
+- write source snapshots into the case artifact directory;
+- create `market-universe.json`;
+- create `belief-priors.json`;
+- write a manifest with source hashes;
+- persist `overnight_case_bundles`.
 
-LLMs can generate cases or explanations. They should not be the authority for pass/fail.
+It must not create Automakit tradable markets merely because Polymarket or another source has a market.
 
-### 5.4 `agent-gateway`
+### 6.3 Scenario agents
 
-The gateway remains the only agent-facing execution facade.
+Scenario agents create plausible tomorrow paths as typed artifacts.
 
-Required additions:
+They should use code when useful:
 
-- attach `arena_run_id` to tool-call events;
-- reject live write attempts without promotion artifacts;
-- return structured, agent-readable errors;
-- emit state hashes for every state-changing tool call;
-- keep execution semantics stable across projection and live modes.
+```ts
+type OvernightScenario = {
+  scenario_key: string;
+  probability: number;
+  market_shocks: Array<{
+    source_market_id: string;
+    outcome_id: string;
+    probability_delta: number;
+    liquidity_delta: number | null;
+  }>;
+  event_updates: Array<{
+    event_ref: string;
+    update_kind: string;
+    summary: string;
+    evidence_refs: string[];
+  }>;
+  rationale: string;
+};
+```
 
-### 5.5 `release-gate`
+The runtime should validate the artifact shape. It should not patch invalid scenarios with heuristics.
 
-Release gate consumes arena scorecards.
+### 6.4 Sandbox runner
 
-Promotion can depend on:
+The runner executes agents against a production-shaped projection backend.
 
-- specific suite versions,
-- minimum score thresholds,
-- zero hard risk violations,
-- required live-write denial evidence,
-- replay stability,
-- shadow-live observation windows,
-- tiny-notional live results when available.
+Responsibilities:
 
-Arena ranking alone must never grant live permissions.
+- create fake but explicit starting cash;
+- seed sandbox books from the case bundle and scenario;
+- route agent actions through the gateway;
+- persist portfolio/action trace artifact refs;
+- emit scorecard inputs.
 
-## 6. Persistence Model
+### 6.5 Verifier
 
-Add tables in `packages/persistence`.
+The verifier remains deterministic.
 
-### 6.1 `arena_suites`
+Responsibilities:
 
-Stores versioned evaluation suites.
+- inspect tool-call events;
+- inspect state hashes;
+- inspect orders, fills, cancels, balances, and risk limits;
+- compare forecasts against settlement data when available;
+- compute scorecards.
+
+LLMs can explain failures or generate scenarios. They should not be the authority for pass/fail.
+
+## 7. Persistence Model
+
+PR1 adds the overnight sandbox foundation to `packages/persistence/src/index.ts`.
+
+### 7.1 `overnight_case_bundles`
+
+One immutable post-close daily case.
 
 Fields:
 
 - `id`
-- `key`
-- `version`
-- `title`
-- `description`
-- `visibility`
+- `case_date`
+- `case_key`
 - `status`
-- `scoring_manifest`
+- `close_captured_at`
+- `artifact_root`
+- `manifest_path`
+- `manifest_hash`
+- `source_snapshot_refs`
+- `market_universe_ref`
+- `belief_prior_ref`
+- `scenario_ensemble_ref`
+- `metadata`
 - `created_at`
 - `updated_at`
 
-Unique key:
+Constraints and indexes:
 
-- `(key, version)`
+- unique `case_date`;
+- unique `case_key`;
+- index `(status, case_date DESC)`.
 
-### 6.2 `arena_cases`
+### 7.2 `overnight_scenarios`
 
-Stores immutable cases inside a suite.
+One generated tomorrow path for a case bundle.
 
 Fields:
 
 - `id`
-- `suite_id`
-- `case_key`
-- `regime`
-- `input_ref`
-- `input_hash`
-- `market_tape_ref`
-- `verifier_manifest`
-- `hidden_manifest_ref`
+- `case_bundle_id`
+- `scenario_key`
+- `scenario_agent_id`
+- `scenario_ref`
+- `scenario_hash`
+- `probability`
+- `manifest`
 - `created_at`
 
-Unique key:
+Constraints and indexes:
 
-- `(suite_id, case_key)`
+- foreign key to `overnight_case_bundles`;
+- unique `(case_bundle_id, scenario_key)`;
+- index `case_bundle_id`.
 
-### 6.3 `arena_participants`
+### 7.3 `overnight_sandbox_runs`
 
-Stores agent/model/tool versions being evaluated.
-
-Fields:
-
-- `id`
-- `agent_id`
-- `agent_version`
-- `tool_manifest_hash`
-- `model_provider`
-- `model_name`
-- `metadata`
-- `created_at`
-
-Unique key:
-
-- `(agent_id, agent_version, tool_manifest_hash)`
-
-### 6.4 `arena_runs`
-
-Stores one participant running one case or suite.
+One coordinated sandbox execution for a case bundle.
 
 Fields:
 
 - `id`
-- `suite_id`
-- `case_id`
-- `participant_id`
-- `gate_run_id`
-- `execution_mode`
-- `regime`
+- `case_bundle_id`
+- `run_key`
 - `status`
+- `execution_mode`
+- `sandbox_manifest`
 - `started_at`
 - `completed_at`
 - `failure_reason`
-- `scorecard_id`
 - `created_at`
+- `updated_at`
 
-Indexes:
+Constraints and indexes:
 
-- `(suite_id, participant_id, created_at DESC)`
-- `(regime, status, created_at DESC)`
-- `(gate_run_id)`
+- foreign key to `overnight_case_bundles`;
+- unique `run_key`;
+- index `(case_bundle_id, status, created_at DESC)`.
 
-### 6.5 `arena_scorecards`
+### 7.4 `overnight_agent_runs`
 
-Stores deterministic scoring output.
+One participant agent inside an overnight sandbox run.
 
 Fields:
 
 - `id`
-- `arena_run_id`
-- `suite_id`
-- `participant_id`
-- `regime`
+- `sandbox_run_id`
+- `participant_agent_id`
+- `participant_version`
+- `status`
+- `starting_cash`
+- `sandbox_portfolio_ref`
+- `action_trace_ref`
+- `scorecard_id`
+- `started_at`
+- `completed_at`
+- `failure_reason`
+- `created_at`
+- `updated_at`
+
+Constraints and indexes:
+
+- foreign key to `overnight_sandbox_runs`;
+- foreign key to `agents`;
+- nullable foreign key to `overnight_scorecards`;
+- index `(sandbox_run_id, status, created_at DESC)`;
+- index `(participant_agent_id, created_at DESC)`.
+
+### 7.5 `overnight_scorecards`
+
+Deterministic scoring output for a run or agent run.
+
+Fields:
+
+- `id`
+- `sandbox_run_id`
+- `agent_run_id`
+- `case_bundle_id`
 - `score_total`
 - `score_dimensions`
 - `hard_failures`
 - `soft_failures`
 - `verifier_version`
-- `input_hash`
+- `input_manifest_hash`
+- `scenario_hashes`
+- `market_impact_label`
+- `live_claim`
 - `created_at`
 
-### 6.6 `arena_leaderboard_entries`
+Constraints and indexes:
 
-Stores comparable ranking rows.
+- foreign key to `overnight_sandbox_runs`;
+- nullable foreign key to `overnight_agent_runs`;
+- foreign key to `overnight_case_bundles`;
+- default `live_claim=false`;
+- index `(case_bundle_id, created_at DESC)`;
+- index `agent_run_id`.
+
+### 7.6 `overnight_settlements`
+
+Actual next-day data and settlement manifest for a case bundle.
 
 Fields:
 
 - `id`
-- `suite_id`
-- `participant_id`
-- `regime`
-- `score_total`
-- `score_dimensions`
-- `rank`
-- `sample_count`
-- `last_run_at`
-- `created_at`
-- `updated_at`
-
-Unique key:
-
-- `(suite_id, participant_id, regime)`
-
-Never create a global entry that mixes regimes.
-
-### 6.7 `market_tapes`
-
-Stores immutable references to external market snapshots.
-
-Fields:
-
-- `id`
-- `source`
-- `source_market_id`
-- `source_url`
-- `window_start`
-- `window_end`
-- `tape_ref`
-- `tape_hash`
-- `metadata`
+- `case_bundle_id`
+- `settlement_key`
+- `actual_data_ref`
+- `actual_data_hash`
+- `settlement_manifest`
+- `settled_at`
 - `created_at`
 
-The tape can live in object storage or a local artifact directory. The DB stores references and hashes.
+Constraints and indexes:
 
-## 7. API Surface
+- foreign key to `overnight_case_bundles`;
+- unique `settlement_key`;
+- index `(case_bundle_id, settled_at DESC)`.
 
-### 7.1 Arena management
+## 8. API Surface
 
-```text
-POST /v1/internal/arena/suites
-GET  /v1/internal/arena/suites
-GET  /v1/internal/arena/suites/:suite_id
-POST /v1/internal/arena/suites/:suite_id/cases
-GET  /v1/internal/arena/suites/:suite_id/cases
-```
-
-### 7.2 Participant enrollment
+Future `overnight-arena` service endpoints:
 
 ```text
-POST /v1/arena/participants
-GET  /v1/arena/participants/:participant_id
+POST /v1/internal/overnight/cases/build
+GET  /v1/internal/overnight/cases
+GET  /v1/internal/overnight/cases/:case_bundle_id
+POST /v1/internal/overnight/cases/:case_bundle_id/scenarios
+GET  /v1/internal/overnight/cases/:case_bundle_id/scenarios
+POST /v1/internal/overnight/cases/:case_bundle_id/runs
+GET  /v1/internal/overnight/runs/:run_id
+GET  /v1/internal/overnight/runs/:run_id/agent-runs
+GET  /v1/internal/overnight/runs/:run_id/scorecards
+POST /v1/internal/overnight/cases/:case_bundle_id/settlements
+GET  /v1/arena/overnight/:case_date/leaderboard
 ```
 
-The participant payload should include:
+Leaderboard endpoints must be scoped by case date or case bundle id. There should be no global fake-balance leaderboard.
 
-- `agent_id`
-- `agent_version`
-- `tool_manifest_hash`
-- `model_provider`
-- `model_name`
-- `metadata`
-
-### 7.3 Runs
-
-```text
-POST /v1/arena/runs
-GET  /v1/arena/runs/:run_id
-GET  /v1/arena/runs/:run_id/trace
-GET  /v1/arena/runs/:run_id/debug-report
-POST /v1/arena/runs/:run_id/replay
-```
-
-Run creation payload:
-
-```json
-{
-  "suite_id": "suite_tool_gym_v1",
-  "participant_id": "participant_123",
-  "regime": "tool_call_gym",
-  "execution_mode": "projection"
-}
-```
-
-### 7.4 Scorecards and leaderboards
-
-```text
-GET /v1/arena/runs/:run_id/scorecard
-GET /v1/arena/leaderboards?suite_id=...&regime=...
-```
-
-The leaderboard endpoint must require `regime`.
-
-## 8. Agent Debug Report
+## 9. Agent Debug Report
 
 The debug report is the main agent-facing artifact.
-
-It should be structured for agents, not humans.
 
 Shape:
 
 ```json
 {
-  "run_id": "arena_run_123",
-  "case_id": "case_cancel_after_partial_fill",
+  "case_bundle_id": "case_2026_07_15",
+  "sandbox_run_id": "overnight_run_123",
+  "agent_run_id": "agent_run_456",
   "status": "failed",
   "hard_failures": [
     {
-      "code": "cancel_missing_after_partial_fill",
-      "tool_name": "orders.cancel",
+      "code": "stale_prior_used_after_scenario_update",
+      "tool_name": "orders.submit",
       "observed_state_hash": "sha256:...",
-      "required_behavior": "Cancel remaining quantity after partial fill when exposure limit is reached.",
-      "evidence_event_ids": ["evt_1", "evt_2"]
+      "required_behavior": "Read the scenario-adjusted market state before submitting an order.",
+      "evidence_refs": ["trace://overnight_run_123/events/18"]
     }
   ],
-  "suggested_next_checks": [
-    "Read current open order state before submitting replacement orders.",
-    "Verify reserved cash after partial fill."
-  ],
+  "score_dimensions": {
+    "tool": 0.72,
+    "risk": 0.88,
+    "forecast": 0.41,
+    "execution": 0.64
+  },
   "replay": {
-    "suite_id": "tool_gym",
-    "case_key": "cancel_after_partial_fill",
-    "input_hash": "sha256:..."
+    "manifest_hash": "sha256:...",
+    "scenario_hashes": ["sha256:..."]
   }
 }
 ```
 
-The report should not hide failures behind human prose. It should give exact contract violations and event ids.
+The report should expose exact machine-readable contract violations and evidence refs. It should not hide failures behind human-only prose.
 
-## 9. Scoring
+## 10. Scoring
 
-Scorecards should be multidimensional.
+Scorecards are multidimensional.
 
-### 9.1 Hard gates
+### 10.1 Hard failures
 
 Hard failures set `eligible_for_promotion=false`.
 
 Examples:
 
-- unauthorized live write attempt,
-- risk limit violation,
-- invalid order schema,
-- missing required cancel,
-- duplicate order without idempotency key,
-- hidden verifier failure,
-- unresolved state hash mismatch.
+- unauthorized live write attempt;
+- risk limit violation;
+- invalid order schema;
+- duplicate order without idempotency key;
+- hidden verifier failure;
+- unresolved state hash mismatch;
+- forecast artifact missing required source refs.
 
-### 9.2 Tool score
+### 10.2 Tool score
 
 Measures:
 
-- valid tool-call rate,
-- required tool coverage,
-- tool-call ordering,
-- idempotency,
-- recovery after error,
+- valid tool-call rate;
+- required tool coverage;
+- tool-call ordering;
+- idempotency;
+- recovery after denied writes;
 - state-hash coverage.
 
-### 9.3 Risk score
+### 10.3 Risk score
 
 Measures:
 
-- exposure discipline,
-- order notional discipline,
-- drawdown discipline in projection,
-- correct handling of denied writes,
+- exposure discipline;
+- order notional discipline;
+- drawdown discipline;
+- correct handling of denied writes;
 - no bypass of promotion artifacts.
 
-### 9.4 Market reasoning score
+### 10.4 Forecast score
 
 Measures:
 
-- forecast calibration,
-- Brier or log score where outcomes resolve,
-- reaction to prior changes,
-- stale-data detection,
+- calibration against actual T1 data;
+- Brier or log score where outcomes resolve;
+- reaction to scenario updates;
+- stale-data detection;
 - overconfidence penalty.
 
-### 9.5 Execution quality score
+### 10.5 Execution score
 
-Depends on regime.
+Measures:
 
-Replay market:
+- sandbox fill quality under declared mechanics;
+- simulated market-impact quality;
+- liquidity consumption;
+- inventory discipline;
+- consistency across scenario ensemble paths.
 
-- no-impact execution quality,
-- slippage under declared fill model,
-- order timing.
+## 11. Concrete PR Plan
 
-Impact projection:
-
-- simulated market-impact quality,
-- liquidity consumption,
-- manipulation resistance.
-
-Tiny-notional live:
-
-- real fill quality,
-- realized live slippage,
-- realized live PnL.
-
-## 10. Concrete PR Plan
-
-### PR 1: Product boundary and schema
+### PR 1: Overnight product boundary and schema
 
 Files:
 
@@ -652,205 +626,175 @@ Files:
 
 Work:
 
-- add arena docs;
-- add tables for suites, cases, participants, runs, scorecards, leaderboard entries, and market tapes;
-- add indexes and uniqueness constraints;
-- add migrations using existing persistence style.
+- make `overnight_sandbox` the primary arena regime;
+- keep prior regimes as supporting tools;
+- add overnight case, scenario, run, agent-run, scorecard, and settlement tables;
+- add indexes and uniqueness constraints using existing persistence style.
 
 Acceptance:
 
-- persistence typecheck passes;
-- DB init creates arena tables idempotently.
+- `pnpm --filter @automakit/persistence typecheck` passes;
+- `git diff --check` passes.
 
-### PR 2: `arena-service` skeleton
-
-Files:
-
-- `services/arena-service/package.json`
-- `services/arena-service/tsconfig.json`
-- `services/arena-service/src/index.ts`
-- root package scripts if needed.
+### PR 2: Case bundle builder
 
 Work:
 
-- expose suite, case, participant, run, scorecard, and leaderboard endpoints;
-- persist records only;
-- no market logic yet.
+- create `services/overnight-arena`;
+- build a case bundle from belief priors and external market refs;
+- write deterministic artifact directories;
+- persist `overnight_case_bundles`;
+- expose case read APIs.
 
 Acceptance:
 
-- service typechecks;
-- can create a suite, case, participant, and run locally.
+- one command creates a case bundle for a chosen date;
+- manifest hash is stable for identical inputs.
 
-### PR 3: Tool-Call Gym v1
+### PR 3: Scenario ensemble generation
 
 Work:
 
-- define first public suite: `tool_call_gym_v1`;
-- implement deterministic cases:
-  - invalid order rejected,
-  - duplicate client order id,
-  - partial fill then cancel,
-  - stale portfolio state,
-  - live write denied without promotion artifact,
-  - risk limit breach,
-  - stream replay after disconnect.
+- define scenario artifact schema;
+- call scenario agents to generate tomorrow paths;
+- validate artifacts strictly;
+- persist `overnight_scenarios`;
+- write `scenario-ensemble.json`.
 
 Acceptance:
 
-- a test agent can run all cases;
-- verifier emits structured debug reports.
+- invalid scenario artifacts fail closed with agent-readable errors;
+- scenario hashes appear in the case bundle.
 
-### PR 4: Arena run wiring through `agent-gateway`
+### PR 4: Sandbox runner
 
 Work:
 
-- accept `x-arena-run-id`;
-- attach arena run id to tool-call ledger events;
-- include state hashes in gateway event metadata;
-- preserve existing release-gate behavior.
+- seed simulated books from case plus scenario;
+- create starting cash and portfolio refs;
+- route agent tool calls through the gateway;
+- persist `overnight_sandbox_runs` and `overnight_agent_runs`;
+- write action traces.
 
 Acceptance:
 
-- every tool call in a gym run can be traced to an arena run;
-- missing or invalid arena run ids fail closed only for arena endpoints, not normal gateway use.
+- at least one registered agent can complete an overnight sandbox run locally.
 
-### PR 5: Verifier and scorecards
+### PR 5: Deterministic verifier and scorecards
 
 Work:
 
-- implement deterministic verifier manifests;
-- compute hard failures and score dimensions;
-- persist `arena_scorecards`;
-- update leaderboard entries by suite and regime.
+- compute tool, risk, forecast, and execution dimensions;
+- persist `overnight_scorecards`;
+- generate agent debug reports.
 
 Acceptance:
 
-- leaderboard endpoint requires suite and regime;
-- mixed-regime leaderboard requests are rejected.
+- scorecards include input manifest hash, scenario hashes, market-impact label, and `live_claim=false`.
 
-### PR 6: Replay Market Arena v1
+### PR 6: Settlement ingestion
 
 Work:
 
-- ingest Polymarket/Kalshi snapshots into `market_tapes`;
-- create replay cases from immutable tape windows;
-- execute paper orders against declared no-impact fill model;
-- compute calibration and execution scores.
+- ingest actual next-day data;
+- write settlement artifacts;
+- persist `overnight_settlements`;
+- update forecast and execution scores after actuals arrive.
 
 Acceptance:
 
-- scorecard includes `market_impact=none`;
-- no score is labeled live;
-- tape hash is included in every scorecard.
+- a closed case can move from `pending_settlement` to `settled`.
 
-### PR 7: Shadow-Live Arena v1
+### PR 7: Overnight leaderboard
 
 Work:
 
-- schedule current live-context episodes from belief priors;
-- capture proposed orders without sending them;
-- finalize market reasoning scores after outcome or window close.
+- publish case-scoped rankings;
+- show score dimensions and hard failures;
+- prohibit global mixed-regime PnL ranking.
 
 Acceptance:
 
-- scorecard includes `regime=shadow_live`;
-- all proposed orders are non-live;
-- future settlement is explicit and replayable.
+- every leaderboard query is scoped by case date or bundle id.
 
-### PR 8: Impact Projection Arena v1
+### PR 8: Release-gate integration
 
 Work:
 
-- seed simulated books from external priors;
-- let agents affect simulated prices;
-- record divergence from source priors;
-- score endogenous behavior separately from replay/shadow-live.
+- allow release gate snapshots to reference overnight scorecards;
+- require zero hard failures for promotion evidence;
+- keep live-write promotion artifact checks unchanged.
 
 Acceptance:
 
-- scorecard includes `market_impact=simulated`;
-- no live-sync claim exists after first simulated fill.
+- overnight success can support promotion but cannot bypass live artifact rules.
 
-### PR 9: Arena UI
+### PR 9: Tiny-notional live bridge
 
 Work:
 
-- add arena console as a first-class view;
-- show suites, regimes, participants, runs, scorecards, debug reports, and leaderboards;
-- hide or down-rank projection PnL unless inside a labeled scorecard.
+- admit only promoted agents;
+- enforce live adapter risk limits;
+- record real live results separately from sandbox scorecards.
 
 Acceptance:
 
-- no global mixed leaderboard exists;
-- every score row displays suite version and regime.
+- only tiny-notional live scorecards can claim `live_claim=true`.
 
-### PR 10: Tiny-Notional Live Arena
+## 12. What To Remove Or Rewrite
 
-Work:
+Remove from product center:
 
-- require promotion artifacts;
-- route orders to a real live adapter;
-- enforce strict notional, market, side, and expiry scopes;
-- record live execution events separately from projection events.
-
-Acceptance:
-
-- no live run starts without a valid promotion artifact;
-- live scorecards are the only scorecards allowed to claim live PnL.
-
-## 11. What To Remove Or Rewrite
-
-### Remove from product center
-
-- global projection PnL leaderboards,
-- fake balance performance claims,
-- Polymarket clone positioning,
+- global projection PnL leaderboards;
+- fake balance performance claims;
+- Polymarket clone positioning;
 - any UI that implies paper execution is live execution.
 
-### Rewrite
+Rewrite:
 
-- `trade-simulator` should become explicit projection liquidity infrastructure or stay disabled by default.
-- market views should become case context, not the main product.
-- release-gate docs should say that external market mirroring and projection trading are important ingredients, not moats by themselves.
+- `trade-simulator` should become explicit sandbox liquidity infrastructure or stay disabled by default;
+- market views should become case context, not the main product;
+- release-gate docs should say external market mirroring and projection trading are ingredients, not moats by themselves.
 
-### Keep
+Keep:
 
-- belief-prior intake,
-- projection execution,
-- fake balances for environment state,
-- market proposal agents,
+- belief-prior intake;
+- projection execution;
+- fake balances for environment state;
+- market proposal agents;
 - release-gate promotion artifacts.
 
-These are necessary environment components. They are not sufficient as a product claim unless tied to arena regimes and verifier evidence.
+These are necessary environment components. They are not sufficient as a product claim unless tied to overnight cases, scorecards, settlement, and verifier evidence.
 
-## 12. Acceptance Criteria For The Direction
+## 13. Acceptance Criteria For The Direction
 
 The direction is implemented when:
 
-- an agent can run a tool-call gym suite and receive exact machine-readable failure reasons;
-- two agents can run the same replay suite and get comparable scorecards;
-- every scorecard includes suite id, suite version, input hash, regime, and market-impact label;
-- leaderboard APIs reject mixed-regime rankings;
+- Automakit can freeze an after-close daily case bundle with source hashes;
+- scenario agents can generate validated tomorrow paths;
+- many agents can trade in an internally causal sandbox;
+- every scorecard includes case id, manifest hash, scenario hashes, market-impact label, and `live_claim`;
+- actual next-day data can settle the case;
+- leaderboards are scoped to case date or case bundle;
 - projection PnL is never presented as live PnL;
-- release gate can consume arena scorecards as promotion evidence;
-- live write access still requires a promotion artifact;
-- tiny-notional live results are stored and ranked separately from projection results.
+- release gate can consume overnight scorecards as promotion evidence;
+- live write access still requires a promotion artifact.
 
-## 13. Naming
+## 14. Naming
 
 Use:
 
-- `Automakit Env` for the execution environment,
-- `Automakit Arena` for the comparative evaluation protocol,
-- `Tool-Call Gym` for deterministic tool and state tasks,
-- `Replay Market Arena` for fixed tape evaluation,
-- `Shadow-Live Arena` for live-context non-ordering evaluation,
-- `Tiny-Notional Live Arena` for real limited execution.
+- `Automakit Overnight Sandbox` for the primary daily arena;
+- `Automakit Env` for the execution environment;
+- `Automakit Arena` for the comparative evaluation protocol;
+- `Tool-Call Gym` for deterministic tool and state tasks;
+- `Replay Market` for fixed tape regression;
+- `Shadow-Live Capture` for live-context data capture without order writes;
+- `Tiny-Notional Live` for real limited execution.
 
 Avoid:
 
-- "paper trading leaderboard" as the main product,
-- "live benchmark" unless orders are actually live,
-- "Polymarket clone",
+- "paper trading leaderboard" as the main product;
+- "live benchmark" unless orders are actually live;
+- "Polymarket clone";
 - "projection PnL proves trading skill".
