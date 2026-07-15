@@ -92,20 +92,14 @@ Initial local layout:
 .automakit/overnight-cases/2026-07-15/
   manifest.json
   source-snapshots/
-    polymarket.json
-    kalshi.json
-    news.json
-    macro.json
+    external-market-refs.json
+    belief-prior-snapshots.json
   belief-priors.json
   market-universe.json
-  scenario-ensemble.json
-  hidden-verifier-manifest.json
-  settlement/
-    actual-data.json
-    settlement-manifest.json
 ```
 
 The manifest hash is the canonical input identity for reproducibility.
+The initial builder does not generate a scenario file; `scenario_ensemble_ref` stays null until scenario generation lands.
 
 ### 4.3 Scenario Ensemble
 
@@ -286,6 +280,7 @@ Responsibilities:
 - persist `overnight_case_bundles`.
 
 It must not create Automakit tradable markets merely because Polymarket or another source has a market.
+It must refuse to build if persisted source rows are absent, returning `overnight_case_source_data_empty` instead of fake fixtures.
 
 ### 6.3 Scenario agents
 
@@ -519,6 +514,28 @@ GET  /v1/arena/overnight/:case_date/leaderboard
 
 Leaderboard endpoints must be scoped by case date or case bundle id. There should be no global fake-balance leaderboard.
 
+Implemented PR3 builder endpoint:
+
+```text
+POST /v1/internal/overnight/cases/build
+```
+
+Required body:
+
+- `case_date` as `YYYY-MM-DD`;
+- `close_captured_at` as an ISO timestamp.
+
+Optional body:
+
+- `case_key`;
+- `artifact_root`;
+- `source_limit`;
+- `belief_prior_limit`;
+- `status`;
+- `metadata`.
+
+The endpoint writes deterministic JSON under the artifact root, hashes `manifest.json`, and upserts `overnight_case_bundles` by `case_key`. It only uses persisted `external_market_refs` and `belief_prior_snapshots`; no scenario generation or trading logic runs in the builder.
+
 ## 9. Agent Debug Report
 
 The debug report is the main agent-facing artifact.
@@ -636,22 +653,36 @@ Acceptance:
 - `pnpm --filter @automakit/persistence typecheck` passes;
 - `git diff --check` passes.
 
-### PR 2: Case bundle builder
+### PR 2: Overnight arena metadata service
 
 Work:
 
 - create `services/overnight-arena`;
-- build a case bundle from belief priors and external market refs;
-- write deterministic artifact directories;
-- persist `overnight_case_bundles`;
-- expose case read APIs.
+- expose health, case metadata, and sandbox run metadata endpoints;
+- allow explicit case bundle registration for already-built artifacts.
 
 Acceptance:
 
-- one command creates a case bundle for a chosen date;
-- manifest hash is stable for identical inputs.
+- `pnpm --filter @automakit/overnight-arena typecheck` passes;
+- metadata endpoints can list and fetch case bundle rows.
 
-### PR 3: Scenario ensemble generation
+### PR 3: Case bundle builder
+
+Work:
+
+- add `POST /v1/internal/overnight/cases/build`;
+- build a case bundle from persisted belief priors and external market refs;
+- write deterministic local artifact directories;
+- persist or update `overnight_case_bundles`;
+- leave `scenario_ensemble_ref` null.
+
+Acceptance:
+
+- one request creates a case bundle for a chosen date;
+- manifest hash is stable for identical inputs;
+- empty source tables fail closed with `overnight_case_source_data_empty`.
+
+### PR 4: Scenario ensemble generation
 
 Work:
 
@@ -666,7 +697,7 @@ Acceptance:
 - invalid scenario artifacts fail closed with agent-readable errors;
 - scenario hashes appear in the case bundle.
 
-### PR 4: Sandbox runner
+### PR 5: Sandbox runner
 
 Work:
 

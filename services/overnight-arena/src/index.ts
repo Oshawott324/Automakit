@@ -1,4 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
 import Fastify from "fastify";
 import type { FastifyReply } from "fastify";
 import { createDatabasePool, ensureCoreSchema, parseJsonField, toIsoTimestamp } from "@automakit/persistence";
@@ -42,9 +44,103 @@ type StatusCountRow = {
   count: string;
 };
 
+type ExternalMarketRefSourceRow = {
+  id: string;
+  belief_source_id: string;
+  source_key: string | null;
+  source_adapter: string | null;
+  source_url: string | null;
+  source_trust_tier: string | null;
+  source_market_id: string;
+  source_market_slug: string | null;
+  market_url: string;
+  title: string;
+  question: string | null;
+  description: string | null;
+  category: string | null;
+  status: string;
+  close_time: unknown;
+  end_time: unknown;
+  raw_payload: unknown;
+  provenance: unknown;
+  first_seen_at: unknown;
+  last_seen_at: unknown;
+  created_at: unknown;
+  updated_at: unknown;
+};
+
+type BeliefPriorSnapshotSourceRow = {
+  id: string;
+  snapshot_key: string;
+  belief_source_id: string;
+  source_key: string | null;
+  source_adapter: string | null;
+  source_url: string | null;
+  source_trust_tier: string | null;
+  external_market_ref_id: string;
+  source_market_id: string;
+  outcome_id: string;
+  outcome_name: string;
+  probability: number;
+  liquidity: number | null;
+  volume: number | null;
+  best_bid: number | null;
+  best_ask: number | null;
+  last_trade_price: number | null;
+  market_status: string;
+  outcomes: unknown;
+  tokens: unknown;
+  prices: unknown;
+  raw_payload: unknown;
+  provenance: unknown;
+  fetched_at: unknown;
+  effective_at: unknown;
+  created_at: unknown;
+  ref_source_market_slug: string | null;
+  ref_market_url: string;
+  ref_title: string;
+  ref_question: string | null;
+  ref_category: string | null;
+  ref_status: string;
+  ref_close_time: unknown;
+  ref_end_time: unknown;
+};
+
+type ArtifactRef = {
+  path: string;
+  sha256: string;
+};
+
+type SourceSnapshotRef = ArtifactRef & {
+  kind: "external_market_refs" | "belief_prior_snapshots";
+};
+
+type MarketUniverseItem = {
+  external_market_ref_id: string;
+  source_market_id: string;
+  source_market_slug: string | null;
+  source_key: string | null;
+  source_adapter: string | null;
+  market_url: string;
+  title: string;
+  question: string | null;
+  category: string | null;
+  status: string;
+  close_time: string | null;
+  end_time: string | null;
+  latest_prior_fetched_at: string | null;
+};
+
 const port = Number(process.env.OVERNIGHT_ARENA_PORT ?? 4017);
 const app = Fastify({ logger: true });
 const pool = createDatabasePool();
+
+const caseBundleSchemaVersion = "overnight_case_bundle.v1";
+const defaultCaseArtifactRoot = ".automakit/overnight-cases";
+const defaultSourceLimit = 500;
+const defaultBeliefPriorLimit = 1000;
+const maxSourceLimit = 5000;
+const maxBeliefPriorLimit = 10000;
 
 const requiredCaseFields = [
   "case_date",
@@ -101,6 +197,95 @@ function parseLimit(value: unknown, defaultValue: number, maxValue: number) {
   return Math.max(1, Math.min(maxValue, Math.trunc(numericValue)));
 }
 
+function readBuildLimit(
+  body: JsonObject,
+  field: "source_limit" | "belief_prior_limit",
+  defaultValue: number,
+  maxValue: number,
+): { ok: true; value: number } | { ok: false; expected: string } {
+  const rawValue = body[field];
+  if (rawValue === undefined || rawValue === null) {
+    return { ok: true, value: defaultValue };
+  }
+
+  const numericValue =
+    typeof rawValue === "number"
+      ? rawValue
+      : typeof rawValue === "string" && rawValue.trim().length > 0
+        ? Number(rawValue)
+        : Number.NaN;
+
+  if (!Number.isInteger(numericValue) || numericValue < 1 || numericValue > maxValue) {
+    return { ok: false, expected: `integer between 1 and ${maxValue}` };
+  }
+
+  return { ok: true, value: numericValue };
+}
+
+function stableStringify(value: unknown): string {
+  if (value === null) {
+    return "null";
+  }
+
+  if (typeof value === "string" || typeof value === "boolean") {
+    return JSON.stringify(value);
+  }
+
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? JSON.stringify(value) : "null";
+  }
+
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item === undefined ? null : item)).join(",")}]`;
+  }
+
+  if (typeof value === "object") {
+    const objectValue = value as Record<string, unknown>;
+    const entries = Object.keys(objectValue)
+      .filter((key) => objectValue[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableStringify(objectValue[key])}`);
+    return `{${entries.join(",")}}`;
+  }
+
+  return "null";
+}
+
+function stableJson(value: unknown) {
+  return `${stableStringify(value)}\n`;
+}
+
+function sha256Ref(value: string) {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+function relativeArtifactPath(artifactRoot: string, filePath: string) {
+  const relativePath = path.relative(artifactRoot, filePath);
+  if (relativePath && !relativePath.startsWith("..") && !path.isAbsolute(relativePath)) {
+    return relativePath.split(path.sep).join("/");
+  }
+  return filePath;
+}
+
+function compareText(left: string, right: string) {
+  if (left < right) {
+    return -1;
+  }
+  if (left > right) {
+    return 1;
+  }
+  return 0;
+}
+
+async function writeJsonArtifact(artifactRoot: string, filePath: string, value: unknown): Promise<ArtifactRef> {
+  const json = stableJson(value);
+  await writeFile(filePath, json, { encoding: "utf8" });
+  return {
+    path: relativeArtifactPath(artifactRoot, filePath),
+    sha256: sha256Ref(json),
+  };
+}
+
 function sendInvalidBody(reply: FastifyReply, error: string) {
   return reply.code(400).send({ error });
 }
@@ -151,6 +336,137 @@ function mapSandboxRunRow(row: OvernightSandboxRunRow) {
     created_at: toIsoTimestamp(row.created_at),
     updated_at: toIsoTimestamp(row.updated_at),
   };
+}
+
+function mapExternalMarketRefSourceRow(row: ExternalMarketRefSourceRow) {
+  return {
+    id: row.id,
+    belief_source: {
+      id: row.belief_source_id,
+      key: row.source_key,
+      adapter: row.source_adapter,
+      source_url: row.source_url,
+      trust_tier: row.source_trust_tier,
+    },
+    source_market_id: row.source_market_id,
+    source_market_slug: row.source_market_slug,
+    market_url: row.market_url,
+    title: row.title,
+    question: row.question,
+    description: row.description,
+    category: row.category,
+    status: row.status,
+    close_time: row.close_time ? toIsoTimestamp(row.close_time) : null,
+    end_time: row.end_time ? toIsoTimestamp(row.end_time) : null,
+    raw_payload: parseJsonField<JsonObject>(row.raw_payload),
+    provenance: parseJsonField<JsonObject>(row.provenance),
+    first_seen_at: toIsoTimestamp(row.first_seen_at),
+    last_seen_at: toIsoTimestamp(row.last_seen_at),
+    created_at: toIsoTimestamp(row.created_at),
+    updated_at: toIsoTimestamp(row.updated_at),
+  };
+}
+
+function mapBeliefPriorSnapshotSourceRow(row: BeliefPriorSnapshotSourceRow) {
+  return {
+    id: row.id,
+    snapshot_key: row.snapshot_key,
+    belief_source: {
+      id: row.belief_source_id,
+      key: row.source_key,
+      adapter: row.source_adapter,
+      source_url: row.source_url,
+      trust_tier: row.source_trust_tier,
+    },
+    external_market_ref: {
+      id: row.external_market_ref_id,
+      source_market_id: row.source_market_id,
+      source_market_slug: row.ref_source_market_slug,
+      market_url: row.ref_market_url,
+      title: row.ref_title,
+      question: row.ref_question,
+      category: row.ref_category,
+      status: row.ref_status,
+      close_time: row.ref_close_time ? toIsoTimestamp(row.ref_close_time) : null,
+      end_time: row.ref_end_time ? toIsoTimestamp(row.ref_end_time) : null,
+    },
+    source_market_id: row.source_market_id,
+    outcome_id: row.outcome_id,
+    outcome_name: row.outcome_name,
+    probability: Number(row.probability),
+    liquidity: row.liquidity === null ? null : Number(row.liquidity),
+    volume: row.volume === null ? null : Number(row.volume),
+    best_bid: row.best_bid === null ? null : Number(row.best_bid),
+    best_ask: row.best_ask === null ? null : Number(row.best_ask),
+    last_trade_price: row.last_trade_price === null ? null : Number(row.last_trade_price),
+    market_status: row.market_status,
+    outcomes: parseJsonField<unknown[]>(row.outcomes),
+    tokens: parseJsonField<unknown[]>(row.tokens),
+    prices: parseJsonField<unknown[]>(row.prices),
+    raw_payload: parseJsonField<JsonObject>(row.raw_payload),
+    provenance: parseJsonField<JsonObject>(row.provenance),
+    fetched_at: toIsoTimestamp(row.fetched_at),
+    effective_at: row.effective_at ? toIsoTimestamp(row.effective_at) : null,
+    created_at: toIsoTimestamp(row.created_at),
+  };
+}
+
+function buildMarketUniverse(
+  externalMarketRefs: ReturnType<typeof mapExternalMarketRefSourceRow>[],
+  beliefPriorSnapshots: ReturnType<typeof mapBeliefPriorSnapshotSourceRow>[],
+) {
+  const markets = new Map<string, MarketUniverseItem>();
+
+  for (const ref of externalMarketRefs) {
+    markets.set(ref.id, {
+      external_market_ref_id: ref.id,
+      source_market_id: ref.source_market_id,
+      source_market_slug: ref.source_market_slug,
+      source_key: ref.belief_source.key,
+      source_adapter: ref.belief_source.adapter,
+      market_url: ref.market_url,
+      title: ref.title,
+      question: ref.question,
+      category: ref.category,
+      status: ref.status,
+      close_time: ref.close_time,
+      end_time: ref.end_time,
+      latest_prior_fetched_at: null,
+    });
+  }
+
+  for (const snapshot of beliefPriorSnapshots) {
+    const current = markets.get(snapshot.external_market_ref.id);
+    if (!current) {
+      markets.set(snapshot.external_market_ref.id, {
+        external_market_ref_id: snapshot.external_market_ref.id,
+        source_market_id: snapshot.external_market_ref.source_market_id,
+        source_market_slug: snapshot.external_market_ref.source_market_slug,
+        source_key: snapshot.belief_source.key,
+        source_adapter: snapshot.belief_source.adapter,
+        market_url: snapshot.external_market_ref.market_url,
+        title: snapshot.external_market_ref.title,
+        question: snapshot.external_market_ref.question,
+        category: snapshot.external_market_ref.category,
+        status: snapshot.external_market_ref.status,
+        close_time: snapshot.external_market_ref.close_time,
+        end_time: snapshot.external_market_ref.end_time,
+        latest_prior_fetched_at: snapshot.fetched_at,
+      });
+      continue;
+    }
+
+    if (!current.latest_prior_fetched_at || snapshot.fetched_at > current.latest_prior_fetched_at) {
+      current.latest_prior_fetched_at = snapshot.fetched_at;
+    }
+  }
+
+  return Array.from(markets.values()).sort((left, right) =>
+    compareText(
+      [left.source_key ?? "", left.source_market_id, left.external_market_ref_id].join(":"),
+      [right.source_key ?? "", right.source_market_id, right.external_market_ref_id].join(":"),
+    ),
+  );
 }
 
 function readOptionalTimestamp(
@@ -249,6 +565,306 @@ app.get("/v1/internal/overnight/cases/:caseBundleId", async (request, reply) => 
   return {
     item: mapCaseBundleRow(result.rows[0]),
   };
+});
+
+app.post("/v1/internal/overnight/cases/build", async (request, reply) => {
+  const body = ensureObjectPayload(request.body);
+  if (!body) {
+    return sendInvalidBody(reply, "overnight_case_build_invalid_body");
+  }
+
+  const caseDate = asString(body.case_date);
+  if (!caseDate) {
+    return sendMissingField(reply, "overnight_case_build_missing_required_field", "case_date");
+  }
+  if (!isValidCaseDate(caseDate)) {
+    return sendInvalidField(reply, "overnight_case_build_invalid_field", "case_date");
+  }
+
+  const closeCapturedAt = asString(body.close_captured_at);
+  if (!closeCapturedAt) {
+    return sendMissingField(reply, "overnight_case_build_missing_required_field", "close_captured_at");
+  }
+  if (!isValidTimestamp(closeCapturedAt)) {
+    return sendInvalidField(reply, "overnight_case_build_invalid_field", "close_captured_at");
+  }
+
+  const caseKey =
+    body.case_key === undefined || body.case_key === null ? `overnight_sandbox:${caseDate}` : asString(body.case_key);
+  if (!caseKey) {
+    return sendInvalidField(reply, "overnight_case_build_invalid_field", "case_key");
+  }
+
+  const status = body.status === undefined || body.status === null ? "created" : asString(body.status);
+  if (!status) {
+    return sendInvalidField(reply, "overnight_case_build_invalid_field", "status");
+  }
+
+  const artifactRootInput =
+    body.artifact_root === undefined || body.artifact_root === null
+      ? process.env.OVERNIGHT_ARENA_ARTIFACT_ROOT ?? defaultCaseArtifactRoot
+      : asString(body.artifact_root);
+  if (!artifactRootInput) {
+    return sendInvalidField(reply, "overnight_case_build_invalid_field", "artifact_root");
+  }
+
+  const sourceLimit = readBuildLimit(body, "source_limit", defaultSourceLimit, maxSourceLimit);
+  if (!sourceLimit.ok) {
+    return reply
+      .code(400)
+      .send({ error: "overnight_case_build_invalid_field", field: "source_limit", expected: sourceLimit.expected });
+  }
+
+  const beliefPriorLimit = readBuildLimit(
+    body,
+    "belief_prior_limit",
+    defaultBeliefPriorLimit,
+    maxBeliefPriorLimit,
+  );
+  if (!beliefPriorLimit.ok) {
+    return reply.code(400).send({
+      error: "overnight_case_build_invalid_field",
+      field: "belief_prior_limit",
+      expected: beliefPriorLimit.expected,
+    });
+  }
+
+  const metadata = body.metadata ?? {};
+  if (!isJsonObject(metadata)) {
+    return sendInvalidField(reply, "overnight_case_build_invalid_field", "metadata");
+  }
+
+  const dateConflict = await pool.query<{ id: string }>(
+    `
+      SELECT id
+      FROM overnight_case_bundles
+      WHERE case_date = $1::date
+        AND case_key <> $2
+      LIMIT 1
+    `,
+    [caseDate, caseKey],
+  );
+
+  if ((dateConflict.rowCount ?? 0) > 0) {
+    return reply.code(409).send({ error: "overnight_case_date_conflict", field: "case_date" });
+  }
+
+  const [externalMarketRefsResult, beliefPriorSnapshotsResult] = await Promise.all([
+    pool.query<ExternalMarketRefSourceRow>(
+      `
+        SELECT
+          refs.*,
+          sources.key AS source_key,
+          sources.adapter AS source_adapter,
+          sources.source_url AS source_url,
+          sources.trust_tier AS source_trust_tier
+        FROM external_market_refs refs
+        JOIN belief_sources sources ON sources.id = refs.belief_source_id
+        WHERE refs.last_seen_at <= $2::timestamptz
+        ORDER BY refs.last_seen_at DESC, refs.id DESC
+        LIMIT $1
+      `,
+      [sourceLimit.value, closeCapturedAt],
+    ),
+    pool.query<BeliefPriorSnapshotSourceRow>(
+      `
+        SELECT
+          snapshots.*,
+          sources.key AS source_key,
+          sources.adapter AS source_adapter,
+          sources.source_url AS source_url,
+          sources.trust_tier AS source_trust_tier,
+          refs.source_market_slug AS ref_source_market_slug,
+          refs.market_url AS ref_market_url,
+          refs.title AS ref_title,
+          refs.question AS ref_question,
+          refs.category AS ref_category,
+          refs.status AS ref_status,
+          refs.close_time AS ref_close_time,
+          refs.end_time AS ref_end_time
+        FROM belief_prior_snapshots snapshots
+        JOIN belief_sources sources ON sources.id = snapshots.belief_source_id
+        JOIN external_market_refs refs ON refs.id = snapshots.external_market_ref_id
+        WHERE snapshots.fetched_at <= $2::timestamptz
+        ORDER BY snapshots.fetched_at DESC, snapshots.id DESC
+        LIMIT $1
+      `,
+      [beliefPriorLimit.value, closeCapturedAt],
+    ),
+  ]);
+
+  const externalMarketRefs = externalMarketRefsResult.rows.map(mapExternalMarketRefSourceRow);
+  const beliefPriorSnapshots = beliefPriorSnapshotsResult.rows.map(mapBeliefPriorSnapshotSourceRow);
+
+  if (externalMarketRefs.length === 0 && beliefPriorSnapshots.length === 0) {
+    return reply.code(422).send({ error: "overnight_case_source_data_empty" });
+  }
+
+  const artifactRoot = path.resolve(process.cwd(), artifactRootInput);
+  const caseArtifactDir = path.join(artifactRoot, caseDate);
+  const sourceSnapshotsDir = path.join(caseArtifactDir, "source-snapshots");
+  await mkdir(sourceSnapshotsDir, { recursive: true });
+
+  const externalMarketRefsSnapshot = {
+    schema_version: "overnight_source_snapshot.external_market_refs.v1",
+    regime: "overnight_sandbox",
+    case_date: caseDate,
+    close_captured_at: closeCapturedAt,
+    source_limit: sourceLimit.value,
+    source_count: externalMarketRefs.length,
+    rows: externalMarketRefs,
+  };
+  const beliefPriorSnapshotsSnapshot = {
+    schema_version: "overnight_source_snapshot.belief_prior_snapshots.v1",
+    regime: "overnight_sandbox",
+    case_date: caseDate,
+    close_captured_at: closeCapturedAt,
+    belief_prior_limit: beliefPriorLimit.value,
+    source_count: beliefPriorSnapshots.length,
+    rows: beliefPriorSnapshots,
+  };
+  const marketUniverseMarkets = buildMarketUniverse(externalMarketRefs, beliefPriorSnapshots);
+  const marketUniverse = {
+    schema_version: "overnight_market_universe.v1",
+    regime: "overnight_sandbox",
+    case_date: caseDate,
+    close_captured_at: closeCapturedAt,
+    market_count: marketUniverseMarkets.length,
+    markets: marketUniverseMarkets,
+  };
+  const beliefPriors = {
+    schema_version: "overnight_belief_priors.v1",
+    regime: "overnight_sandbox",
+    case_date: caseDate,
+    close_captured_at: closeCapturedAt,
+    snapshot_count: beliefPriorSnapshots.length,
+    snapshots: beliefPriorSnapshots,
+  };
+
+  const externalMarketRefsRef = await writeJsonArtifact(
+    artifactRoot,
+    path.join(sourceSnapshotsDir, "external-market-refs.json"),
+    externalMarketRefsSnapshot,
+  );
+  const beliefPriorSnapshotsRef = await writeJsonArtifact(
+    artifactRoot,
+    path.join(sourceSnapshotsDir, "belief-prior-snapshots.json"),
+    beliefPriorSnapshotsSnapshot,
+  );
+  const beliefPriorRef = await writeJsonArtifact(
+    artifactRoot,
+    path.join(caseArtifactDir, "belief-priors.json"),
+    beliefPriors,
+  );
+  const marketUniverseRef = await writeJsonArtifact(
+    artifactRoot,
+    path.join(caseArtifactDir, "market-universe.json"),
+    marketUniverse,
+  );
+  const sourceSnapshotRefs: SourceSnapshotRef[] = [
+    { kind: "external_market_refs", ...externalMarketRefsRef },
+    { kind: "belief_prior_snapshots", ...beliefPriorSnapshotsRef },
+  ];
+
+  const manifest = {
+    schema_version: caseBundleSchemaVersion,
+    regime: "overnight_sandbox",
+    case_date: caseDate,
+    case_key: caseKey,
+    close_captured_at: closeCapturedAt,
+    source_snapshot_refs: sourceSnapshotRefs,
+    market_universe_ref: marketUniverseRef,
+    belief_prior_ref: beliefPriorRef,
+    scenario_ensemble_ref: null,
+    source_counts: {
+      external_market_refs: externalMarketRefs.length,
+      belief_prior_snapshots: beliefPriorSnapshots.length,
+      market_universe: marketUniverse.markets.length,
+    },
+    created_by: "overnight-arena",
+    live_claim: false,
+    market_impact_label: "simulated_after_close",
+    notes: [
+      "Scenario ensemble is not generated yet; this bundle freezes persisted source snapshots, market universe, and belief priors only.",
+    ],
+  };
+  const manifestJson = stableJson(manifest);
+  const manifestHash = sha256Ref(manifestJson);
+  const manifestPath = path.join(caseArtifactDir, "manifest.json");
+  await writeFile(manifestPath, manifestJson, { encoding: "utf8" });
+  const manifestRefPath = relativeArtifactPath(artifactRoot, manifestPath);
+
+  const result = await pool.query<OvernightCaseBundleRow>(
+    `
+      INSERT INTO overnight_case_bundles (
+        id,
+        case_date,
+        case_key,
+        status,
+        close_captured_at,
+        artifact_root,
+        manifest_path,
+        manifest_hash,
+        source_snapshot_refs,
+        market_universe_ref,
+        belief_prior_ref,
+        scenario_ensemble_ref,
+        metadata,
+        created_at,
+        updated_at
+      )
+      VALUES (
+        $1,
+        $2::date,
+        $3,
+        $4,
+        $5::timestamptz,
+        $6,
+        $7,
+        $8,
+        $9::jsonb,
+        $10,
+        $11,
+        $12,
+        $13::jsonb,
+        NOW(),
+        NOW()
+      )
+      ON CONFLICT (case_key) DO UPDATE SET
+        case_date = EXCLUDED.case_date,
+        status = EXCLUDED.status,
+        close_captured_at = EXCLUDED.close_captured_at,
+        artifact_root = EXCLUDED.artifact_root,
+        manifest_path = EXCLUDED.manifest_path,
+        manifest_hash = EXCLUDED.manifest_hash,
+        source_snapshot_refs = EXCLUDED.source_snapshot_refs,
+        market_universe_ref = EXCLUDED.market_universe_ref,
+        belief_prior_ref = EXCLUDED.belief_prior_ref,
+        scenario_ensemble_ref = EXCLUDED.scenario_ensemble_ref,
+        metadata = EXCLUDED.metadata,
+        updated_at = NOW()
+      RETURNING *
+    `,
+    [
+      randomUUID(),
+      caseDate,
+      caseKey,
+      status,
+      closeCapturedAt,
+      artifactRoot,
+      manifestRefPath,
+      manifestHash,
+      JSON.stringify(sourceSnapshotRefs),
+      marketUniverseRef.path,
+      beliefPriorRef.path,
+      null,
+      JSON.stringify(metadata),
+    ],
+  );
+
+  return reply.code(201).send({
+    item: mapCaseBundleRow(result.rows[0]),
+  });
 });
 
 app.post("/v1/internal/overnight/cases", async (request, reply) => {
