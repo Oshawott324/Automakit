@@ -31,6 +31,7 @@ EXECUTION_GATE_PACKAGES=(
   "@automakit/market-service"
   "@automakit/portfolio-service"
   "@automakit/release-gate"
+  "@automakit/overnight-arena"
   "@automakit/resolution-service"
   "@automakit/stream-service"
 )

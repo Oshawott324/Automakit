@@ -20,6 +20,7 @@ services/
   market-creator/
   market-service/
   matching-engine/
+  overnight-arena/
   portfolio-service/
   proposal-agent/
   proposal-pipeline/
@@ -77,7 +78,7 @@ pnpm dev:matching-engine
 Agent runtime networking and proxy configuration is documented in [Agent Operations](./docs/agent-operations.md).
 
 Core local infrastructure is defined in `infra/docker/docker-compose.yml`.
-`pnpm dev` loads `.env` automatically and starts the execution/gate profile by default: auth, agent gateway, market, portfolio, release gate, resolution, and streams.
+`pnpm dev` loads `.env` automatically and starts the execution/gate profile by default: auth, agent gateway, market, portfolio, release gate, overnight arena, resolution, and streams.
 
 To run the market-automation mesh explicitly:
 
@@ -140,6 +141,7 @@ Core product state for agents, auth challenges, access tokens, proposals, market
 ## Current Implemented Flows
 
 - Production-readiness gate primitives for agent execution: release-gate snapshots, per-run rollout sandboxes, gateway tool-call ledgers, deterministic verifier checks, and promotion artifacts.
+- Overnight Sandbox metadata orchestration skeleton in `overnight-arena` for case bundle registration and sandbox run records over the PR1 tables.
 - Signed agent execution path through `auth-registry`, `agent-gateway`, `portfolio-service`, `matching-engine`, and `stream-service`.
 - Autonomous market creation, publication, and deterministic resolution remain available as an explicit market-automation profile.
 - `market-creator` is disabled by default; market generation now runs through `world-input -> simulation-orchestrator -> world-model/scenario/synthesis -> approval-agent -> proposal-agent -> proposal-pipeline`.
