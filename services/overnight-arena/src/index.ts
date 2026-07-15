@@ -39,6 +39,69 @@ type OvernightSandboxRunRow = {
   updated_at: unknown;
 };
 
+type OvernightScenarioRow = {
+  id: string;
+  case_bundle_id: string;
+  scenario_key: string;
+  scenario_agent_id: string | null;
+  scenario_ref: string;
+  scenario_hash: string;
+  probability: number;
+  manifest: unknown;
+  created_at: unknown;
+};
+
+type OvernightAgentRunRow = {
+  id: string;
+  sandbox_run_id: string;
+  participant_agent_id: string;
+  participant_version: string;
+  status: string;
+  starting_cash: number;
+  sandbox_portfolio_ref: string | null;
+  action_trace_ref: string | null;
+  scorecard_id: string | null;
+  started_at: unknown | null;
+  completed_at: unknown | null;
+  failure_reason: string | null;
+  created_at: unknown;
+  updated_at: unknown;
+};
+
+type OvernightScorecardRow = {
+  id: string;
+  sandbox_run_id: string;
+  agent_run_id: string | null;
+  case_bundle_id: string;
+  score_total: number | null;
+  score_dimensions: unknown;
+  hard_failures: unknown;
+  soft_failures: unknown;
+  verifier_version: string;
+  input_manifest_hash: string;
+  scenario_hashes: unknown;
+  market_impact_label: string;
+  live_claim: boolean;
+  created_at: unknown;
+};
+
+type OvernightSettlementRow = {
+  id: string;
+  case_bundle_id: string;
+  settlement_key: string;
+  actual_data_ref: string;
+  actual_data_hash: string;
+  settlement_manifest: unknown;
+  settled_at: unknown;
+  created_at: unknown;
+};
+
+type SandboxRunCaseRow = {
+  id: string;
+  case_bundle_id: string;
+  manifest_hash: string;
+};
+
 type StatusCountRow = {
   status: string;
   count: string;
@@ -222,6 +285,105 @@ function readBuildLimit(
   return { ok: true, value: numericValue };
 }
 
+type FieldReadResult<T> = { ok: true; value: T } | { ok: false; field: string };
+
+function readRequiredFiniteNumber(body: JsonObject, field: string): FieldReadResult<number> {
+  const rawValue = body[field];
+  if (typeof rawValue !== "number" || !Number.isFinite(rawValue)) {
+    return { ok: false, field };
+  }
+
+  return { ok: true, value: rawValue };
+}
+
+function readOptionalFiniteNumber(body: JsonObject, field: string): FieldReadResult<number | null> {
+  const rawValue = body[field];
+  if (rawValue === undefined || rawValue === null) {
+    return { ok: true, value: null };
+  }
+
+  if (typeof rawValue !== "number" || !Number.isFinite(rawValue)) {
+    return { ok: false, field };
+  }
+
+  return { ok: true, value: rawValue };
+}
+
+function readOptionalStringField(body: JsonObject, field: string): FieldReadResult<string | null> {
+  const rawValue = body[field];
+  if (rawValue === undefined || rawValue === null) {
+    return { ok: true, value: null };
+  }
+
+  const value = asString(rawValue);
+  if (!value) {
+    return { ok: false, field };
+  }
+
+  return { ok: true, value };
+}
+
+function readDefaultedStringField(body: JsonObject, field: string, defaultValue: string): FieldReadResult<string> {
+  const rawValue = body[field];
+  if (rawValue === undefined || rawValue === null) {
+    return { ok: true, value: defaultValue };
+  }
+
+  const value = asString(rawValue);
+  if (!value) {
+    return { ok: false, field };
+  }
+
+  return { ok: true, value };
+}
+
+function readDefaultedJsonObjectField(
+  body: JsonObject,
+  field: string,
+  defaultValue: JsonObject,
+): FieldReadResult<JsonObject> {
+  const rawValue = body[field];
+  if (rawValue === undefined || rawValue === null) {
+    return { ok: true, value: defaultValue };
+  }
+
+  if (!isJsonObject(rawValue)) {
+    return { ok: false, field };
+  }
+
+  return { ok: true, value: rawValue };
+}
+
+function readDefaultedArrayField(body: JsonObject, field: string): FieldReadResult<unknown[]> {
+  const rawValue = body[field];
+  if (rawValue === undefined || rawValue === null) {
+    return { ok: true, value: [] };
+  }
+
+  if (!Array.isArray(rawValue)) {
+    return { ok: false, field };
+  }
+
+  return { ok: true, value: rawValue };
+}
+
+function readDefaultedBooleanField(
+  body: JsonObject,
+  field: string,
+  defaultValue: boolean,
+): FieldReadResult<boolean> {
+  const rawValue = body[field];
+  if (rawValue === undefined || rawValue === null) {
+    return { ok: true, value: defaultValue };
+  }
+
+  if (typeof rawValue !== "boolean") {
+    return { ok: false, field };
+  }
+
+  return { ok: true, value: rawValue };
+}
+
 function stableStringify(value: unknown): string {
   if (value === null) {
     return "null";
@@ -335,6 +497,71 @@ function mapSandboxRunRow(row: OvernightSandboxRunRow) {
     failure_reason: row.failure_reason,
     created_at: toIsoTimestamp(row.created_at),
     updated_at: toIsoTimestamp(row.updated_at),
+  };
+}
+
+function mapScenarioRow(row: OvernightScenarioRow) {
+  return {
+    id: row.id,
+    case_bundle_id: row.case_bundle_id,
+    scenario_key: row.scenario_key,
+    scenario_agent_id: row.scenario_agent_id,
+    scenario_ref: row.scenario_ref,
+    scenario_hash: row.scenario_hash,
+    probability: Number(row.probability),
+    manifest: parseJsonField<JsonObject>(row.manifest),
+    created_at: toIsoTimestamp(row.created_at),
+  };
+}
+
+function mapAgentRunRow(row: OvernightAgentRunRow) {
+  return {
+    id: row.id,
+    sandbox_run_id: row.sandbox_run_id,
+    participant_agent_id: row.participant_agent_id,
+    participant_version: row.participant_version,
+    status: row.status,
+    starting_cash: Number(row.starting_cash),
+    sandbox_portfolio_ref: row.sandbox_portfolio_ref,
+    action_trace_ref: row.action_trace_ref,
+    scorecard_id: row.scorecard_id,
+    started_at: row.started_at ? toIsoTimestamp(row.started_at) : null,
+    completed_at: row.completed_at ? toIsoTimestamp(row.completed_at) : null,
+    failure_reason: row.failure_reason,
+    created_at: toIsoTimestamp(row.created_at),
+    updated_at: toIsoTimestamp(row.updated_at),
+  };
+}
+
+function mapScorecardRow(row: OvernightScorecardRow) {
+  return {
+    id: row.id,
+    sandbox_run_id: row.sandbox_run_id,
+    agent_run_id: row.agent_run_id,
+    case_bundle_id: row.case_bundle_id,
+    score_total: row.score_total === null ? null : Number(row.score_total),
+    score_dimensions: parseJsonField<JsonObject>(row.score_dimensions),
+    hard_failures: parseJsonField<unknown[]>(row.hard_failures),
+    soft_failures: parseJsonField<unknown[]>(row.soft_failures),
+    verifier_version: row.verifier_version,
+    input_manifest_hash: row.input_manifest_hash,
+    scenario_hashes: parseJsonField<unknown[]>(row.scenario_hashes),
+    market_impact_label: row.market_impact_label,
+    live_claim: row.live_claim,
+    created_at: toIsoTimestamp(row.created_at),
+  };
+}
+
+function mapSettlementRow(row: OvernightSettlementRow) {
+  return {
+    id: row.id,
+    case_bundle_id: row.case_bundle_id,
+    settlement_key: row.settlement_key,
+    actual_data_ref: row.actual_data_ref,
+    actual_data_hash: row.actual_data_hash,
+    settlement_manifest: parseJsonField<JsonObject>(row.settlement_manifest),
+    settled_at: toIsoTimestamp(row.settled_at),
+    created_at: toIsoTimestamp(row.created_at),
   };
 }
 
@@ -565,6 +792,287 @@ app.get("/v1/internal/overnight/cases/:caseBundleId", async (request, reply) => 
   return {
     item: mapCaseBundleRow(result.rows[0]),
   };
+});
+
+app.get("/v1/internal/overnight/cases/:caseBundleId/scenarios", async (request, reply) => {
+  const caseBundleId = (request.params as { caseBundleId: string }).caseBundleId;
+  const caseBundle = await pool.query<{ id: string }>(
+    `
+      SELECT id
+      FROM overnight_case_bundles
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [caseBundleId],
+  );
+
+  if ((caseBundle.rowCount ?? 0) === 0) {
+    return reply.code(404).send({ error: "overnight_case_not_found", field: "case_bundle_id" });
+  }
+
+  const result = await pool.query<OvernightScenarioRow>(
+    `
+      SELECT *
+      FROM overnight_scenarios
+      WHERE case_bundle_id = $1
+      ORDER BY created_at DESC, scenario_key ASC, id DESC
+    `,
+    [caseBundleId],
+  );
+
+  return {
+    items: result.rows.map(mapScenarioRow),
+  };
+});
+
+app.post("/v1/internal/overnight/cases/:caseBundleId/scenarios", async (request, reply) => {
+  const caseBundleId = (request.params as { caseBundleId: string }).caseBundleId;
+  const body = ensureObjectPayload(request.body);
+  if (!body) {
+    return sendInvalidBody(reply, "overnight_scenario_invalid_body");
+  }
+
+  const scenarioKey = asString(body.scenario_key);
+  if (!scenarioKey) {
+    return sendMissingField(reply, "overnight_scenario_missing_required_field", "scenario_key");
+  }
+
+  const scenarioRef = asString(body.scenario_ref);
+  if (!scenarioRef) {
+    return sendMissingField(reply, "overnight_scenario_missing_required_field", "scenario_ref");
+  }
+
+  const scenarioHash = asString(body.scenario_hash);
+  if (!scenarioHash) {
+    return sendMissingField(reply, "overnight_scenario_missing_required_field", "scenario_hash");
+  }
+
+  if (body.probability === undefined || body.probability === null) {
+    return sendMissingField(reply, "overnight_scenario_missing_required_field", "probability");
+  }
+
+  const probability = readRequiredFiniteNumber(body, "probability");
+  if (!probability.ok || probability.value < 0 || probability.value > 1) {
+    return reply.code(400).send({
+      error: "overnight_scenario_invalid_field",
+      field: "probability",
+      expected: "finite number between 0 and 1",
+    });
+  }
+
+  const scenarioAgentId = readOptionalStringField(body, "scenario_agent_id");
+  if (!scenarioAgentId.ok) {
+    return sendInvalidField(reply, "overnight_scenario_invalid_field", scenarioAgentId.field);
+  }
+
+  const manifest = readDefaultedJsonObjectField(body, "manifest", {});
+  if (!manifest.ok) {
+    return sendInvalidField(reply, "overnight_scenario_invalid_field", manifest.field);
+  }
+
+  const caseBundle = await pool.query<{ id: string }>(
+    `
+      SELECT id
+      FROM overnight_case_bundles
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [caseBundleId],
+  );
+
+  if ((caseBundle.rowCount ?? 0) === 0) {
+    return reply.code(404).send({ error: "overnight_case_not_found", field: "case_bundle_id" });
+  }
+
+  if (scenarioAgentId.value) {
+    const agent = await pool.query<{ id: string }>(
+      `
+        SELECT id
+        FROM agents
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [scenarioAgentId.value],
+    );
+
+    if ((agent.rowCount ?? 0) === 0) {
+      return reply.code(404).send({ error: "overnight_agent_not_found", field: "scenario_agent_id" });
+    }
+  }
+
+  const result = await pool.query<OvernightScenarioRow>(
+    `
+      INSERT INTO overnight_scenarios (
+        id,
+        case_bundle_id,
+        scenario_key,
+        scenario_agent_id,
+        scenario_ref,
+        scenario_hash,
+        probability,
+        manifest,
+        created_at
+      )
+      VALUES (
+        $1,
+        $2,
+        $3,
+        $4,
+        $5,
+        $6,
+        $7,
+        $8::jsonb,
+        NOW()
+      )
+      ON CONFLICT (case_bundle_id, scenario_key) DO UPDATE SET
+        scenario_agent_id = EXCLUDED.scenario_agent_id,
+        scenario_ref = EXCLUDED.scenario_ref,
+        scenario_hash = EXCLUDED.scenario_hash,
+        probability = EXCLUDED.probability,
+        manifest = EXCLUDED.manifest
+      RETURNING *
+    `,
+    [
+      asString(body.id) ?? randomUUID(),
+      caseBundleId,
+      scenarioKey,
+      scenarioAgentId.value,
+      scenarioRef,
+      scenarioHash,
+      probability.value,
+      JSON.stringify(manifest.value),
+    ],
+  );
+
+  return reply.code(201).send({
+    item: mapScenarioRow(result.rows[0]),
+  });
+});
+
+app.get("/v1/internal/overnight/cases/:caseBundleId/settlements", async (request, reply) => {
+  const caseBundleId = (request.params as { caseBundleId: string }).caseBundleId;
+  const caseBundle = await pool.query<{ id: string }>(
+    `
+      SELECT id
+      FROM overnight_case_bundles
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [caseBundleId],
+  );
+
+  if ((caseBundle.rowCount ?? 0) === 0) {
+    return reply.code(404).send({ error: "overnight_case_not_found", field: "case_bundle_id" });
+  }
+
+  const result = await pool.query<OvernightSettlementRow>(
+    `
+      SELECT *
+      FROM overnight_settlements
+      WHERE case_bundle_id = $1
+      ORDER BY settled_at DESC, created_at DESC, id DESC
+    `,
+    [caseBundleId],
+  );
+
+  return {
+    items: result.rows.map(mapSettlementRow),
+  };
+});
+
+app.post("/v1/internal/overnight/cases/:caseBundleId/settlements", async (request, reply) => {
+  const caseBundleId = (request.params as { caseBundleId: string }).caseBundleId;
+  const body = ensureObjectPayload(request.body);
+  if (!body) {
+    return sendInvalidBody(reply, "overnight_settlement_invalid_body");
+  }
+
+  const settlementKey = asString(body.settlement_key);
+  if (!settlementKey) {
+    return sendMissingField(reply, "overnight_settlement_missing_required_field", "settlement_key");
+  }
+
+  const actualDataRef = asString(body.actual_data_ref);
+  if (!actualDataRef) {
+    return sendMissingField(reply, "overnight_settlement_missing_required_field", "actual_data_ref");
+  }
+
+  const actualDataHash = asString(body.actual_data_hash);
+  if (!actualDataHash) {
+    return sendMissingField(reply, "overnight_settlement_missing_required_field", "actual_data_hash");
+  }
+
+  const settledAt = asString(body.settled_at);
+  if (!settledAt) {
+    return sendMissingField(reply, "overnight_settlement_missing_required_field", "settled_at");
+  }
+  if (!isValidTimestamp(settledAt)) {
+    return sendInvalidField(reply, "overnight_settlement_invalid_field", "settled_at");
+  }
+
+  const settlementManifest = readDefaultedJsonObjectField(body, "settlement_manifest", {});
+  if (!settlementManifest.ok) {
+    return sendInvalidField(reply, "overnight_settlement_invalid_field", settlementManifest.field);
+  }
+
+  const caseBundle = await pool.query<{ id: string }>(
+    `
+      SELECT id
+      FROM overnight_case_bundles
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [caseBundleId],
+  );
+
+  if ((caseBundle.rowCount ?? 0) === 0) {
+    return reply.code(404).send({ error: "overnight_case_not_found", field: "case_bundle_id" });
+  }
+
+  const result = await pool.query<OvernightSettlementRow>(
+    `
+      INSERT INTO overnight_settlements (
+        id,
+        case_bundle_id,
+        settlement_key,
+        actual_data_ref,
+        actual_data_hash,
+        settlement_manifest,
+        settled_at,
+        created_at
+      )
+      VALUES (
+        $1,
+        $2,
+        $3,
+        $4,
+        $5,
+        $6::jsonb,
+        $7::timestamptz,
+        NOW()
+      )
+      ON CONFLICT (settlement_key) DO UPDATE SET
+        case_bundle_id = EXCLUDED.case_bundle_id,
+        actual_data_ref = EXCLUDED.actual_data_ref,
+        actual_data_hash = EXCLUDED.actual_data_hash,
+        settlement_manifest = EXCLUDED.settlement_manifest,
+        settled_at = EXCLUDED.settled_at
+      RETURNING *
+    `,
+    [
+      asString(body.id) ?? randomUUID(),
+      caseBundleId,
+      settlementKey,
+      actualDataRef,
+      actualDataHash,
+      JSON.stringify(settlementManifest.value),
+      settledAt,
+    ],
+  );
+
+  return reply.code(201).send({
+    item: mapSettlementRow(result.rows[0]),
+  });
 });
 
 app.post("/v1/internal/overnight/cases/build", async (request, reply) => {
@@ -1136,6 +1644,394 @@ app.get("/v1/internal/overnight/runs/:runId", async (request, reply) => {
   return {
     item: mapSandboxRunRow(result.rows[0]),
   };
+});
+
+app.get("/v1/internal/overnight/runs/:runId/agent-runs", async (request, reply) => {
+  const runId = (request.params as { runId: string }).runId;
+  const run = await pool.query<{ id: string }>(
+    `
+      SELECT id
+      FROM overnight_sandbox_runs
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [runId],
+  );
+
+  if ((run.rowCount ?? 0) === 0) {
+    return reply.code(404).send({ error: "overnight_run_not_found", field: "run_id" });
+  }
+
+  const result = await pool.query<OvernightAgentRunRow>(
+    `
+      SELECT *
+      FROM overnight_agent_runs
+      WHERE sandbox_run_id = $1
+      ORDER BY created_at DESC, id DESC
+    `,
+    [runId],
+  );
+
+  return {
+    items: result.rows.map(mapAgentRunRow),
+  };
+});
+
+app.post("/v1/internal/overnight/runs/:runId/agent-runs", async (request, reply) => {
+  const runId = (request.params as { runId: string }).runId;
+  const body = ensureObjectPayload(request.body);
+  if (!body) {
+    return sendInvalidBody(reply, "overnight_agent_run_invalid_body");
+  }
+
+  const participantAgentId = asString(body.participant_agent_id);
+  if (!participantAgentId) {
+    return sendMissingField(reply, "overnight_agent_run_missing_required_field", "participant_agent_id");
+  }
+
+  const participantVersion = asString(body.participant_version);
+  if (!participantVersion) {
+    return sendMissingField(reply, "overnight_agent_run_missing_required_field", "participant_version");
+  }
+
+  if (body.starting_cash === undefined || body.starting_cash === null) {
+    return sendMissingField(reply, "overnight_agent_run_missing_required_field", "starting_cash");
+  }
+
+  const startingCash = readRequiredFiniteNumber(body, "starting_cash");
+  if (!startingCash.ok || startingCash.value < 0) {
+    return reply.code(400).send({
+      error: "overnight_agent_run_invalid_field",
+      field: "starting_cash",
+      expected: "finite number greater than or equal to 0",
+    });
+  }
+
+  const status = readDefaultedStringField(body, "status", "created");
+  if (!status.ok) {
+    return sendInvalidField(reply, "overnight_agent_run_invalid_field", status.field);
+  }
+
+  const sandboxPortfolioRef = readOptionalStringField(body, "sandbox_portfolio_ref");
+  if (!sandboxPortfolioRef.ok) {
+    return sendInvalidField(reply, "overnight_agent_run_invalid_field", sandboxPortfolioRef.field);
+  }
+
+  const actionTraceRef = readOptionalStringField(body, "action_trace_ref");
+  if (!actionTraceRef.ok) {
+    return sendInvalidField(reply, "overnight_agent_run_invalid_field", actionTraceRef.field);
+  }
+
+  const failureReason = readOptionalStringField(body, "failure_reason");
+  if (!failureReason.ok) {
+    return sendInvalidField(reply, "overnight_agent_run_invalid_field", failureReason.field);
+  }
+
+  const startedAt = readOptionalTimestamp(body, "started_at");
+  if (!startedAt.ok) {
+    return sendInvalidField(reply, "overnight_agent_run_invalid_field", startedAt.field);
+  }
+
+  const completedAt = readOptionalTimestamp(body, "completed_at");
+  if (!completedAt.ok) {
+    return sendInvalidField(reply, "overnight_agent_run_invalid_field", completedAt.field);
+  }
+
+  const run = await pool.query<{ id: string }>(
+    `
+      SELECT id
+      FROM overnight_sandbox_runs
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [runId],
+  );
+
+  if ((run.rowCount ?? 0) === 0) {
+    return reply.code(404).send({ error: "overnight_run_not_found", field: "run_id" });
+  }
+
+  const agent = await pool.query<{ id: string }>(
+    `
+      SELECT id
+      FROM agents
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [participantAgentId],
+  );
+
+  if ((agent.rowCount ?? 0) === 0) {
+    return reply.code(404).send({ error: "overnight_agent_not_found", field: "participant_agent_id" });
+  }
+
+  const result = await pool.query<OvernightAgentRunRow>(
+    `
+      INSERT INTO overnight_agent_runs (
+        id,
+        sandbox_run_id,
+        participant_agent_id,
+        participant_version,
+        status,
+        starting_cash,
+        sandbox_portfolio_ref,
+        action_trace_ref,
+        scorecard_id,
+        started_at,
+        completed_at,
+        failure_reason,
+        created_at,
+        updated_at
+      )
+      VALUES (
+        $1,
+        $2,
+        $3,
+        $4,
+        $5,
+        $6,
+        $7,
+        $8,
+        $9,
+        $10::timestamptz,
+        $11::timestamptz,
+        $12,
+        NOW(),
+        NOW()
+      )
+      RETURNING *
+    `,
+    [
+      asString(body.id) ?? randomUUID(),
+      runId,
+      participantAgentId,
+      participantVersion,
+      status.value,
+      startingCash.value,
+      sandboxPortfolioRef.value,
+      actionTraceRef.value,
+      null,
+      startedAt.value,
+      completedAt.value,
+      failureReason.value,
+    ],
+  );
+
+  return reply.code(201).send({
+    item: mapAgentRunRow(result.rows[0]),
+  });
+});
+
+app.get("/v1/internal/overnight/runs/:runId/scorecards", async (request, reply) => {
+  const runId = (request.params as { runId: string }).runId;
+  const run = await pool.query<{ id: string }>(
+    `
+      SELECT id
+      FROM overnight_sandbox_runs
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [runId],
+  );
+
+  if ((run.rowCount ?? 0) === 0) {
+    return reply.code(404).send({ error: "overnight_run_not_found", field: "run_id" });
+  }
+
+  const result = await pool.query<OvernightScorecardRow>(
+    `
+      SELECT *
+      FROM overnight_scorecards
+      WHERE sandbox_run_id = $1
+      ORDER BY created_at DESC, id DESC
+    `,
+    [runId],
+  );
+
+  return {
+    items: result.rows.map(mapScorecardRow),
+  };
+});
+
+app.post("/v1/internal/overnight/runs/:runId/scorecards", async (request, reply) => {
+  const runId = (request.params as { runId: string }).runId;
+  const body = ensureObjectPayload(request.body);
+  if (!body) {
+    return sendInvalidBody(reply, "overnight_scorecard_invalid_body");
+  }
+
+  const agentRunId = readOptionalStringField(body, "agent_run_id");
+  if (!agentRunId.ok) {
+    return sendInvalidField(reply, "overnight_scorecard_invalid_field", agentRunId.field);
+  }
+
+  const scoreTotal = readOptionalFiniteNumber(body, "score_total");
+  if (!scoreTotal.ok) {
+    return sendInvalidField(reply, "overnight_scorecard_invalid_field", scoreTotal.field);
+  }
+
+  const scoreDimensions = readDefaultedJsonObjectField(body, "score_dimensions", {});
+  if (!scoreDimensions.ok) {
+    return sendInvalidField(reply, "overnight_scorecard_invalid_field", scoreDimensions.field);
+  }
+
+  const hardFailures = readDefaultedArrayField(body, "hard_failures");
+  if (!hardFailures.ok) {
+    return sendInvalidField(reply, "overnight_scorecard_invalid_field", hardFailures.field);
+  }
+
+  const softFailures = readDefaultedArrayField(body, "soft_failures");
+  if (!softFailures.ok) {
+    return sendInvalidField(reply, "overnight_scorecard_invalid_field", softFailures.field);
+  }
+
+  const verifierVersion = readDefaultedStringField(body, "verifier_version", "overnight-verifier@1");
+  if (!verifierVersion.ok) {
+    return sendInvalidField(reply, "overnight_scorecard_invalid_field", verifierVersion.field);
+  }
+
+  const inputManifestHash = readOptionalStringField(body, "input_manifest_hash");
+  if (!inputManifestHash.ok) {
+    return sendInvalidField(reply, "overnight_scorecard_invalid_field", inputManifestHash.field);
+  }
+
+  const scenarioHashes = readDefaultedArrayField(body, "scenario_hashes");
+  if (!scenarioHashes.ok) {
+    return sendInvalidField(reply, "overnight_scorecard_invalid_field", scenarioHashes.field);
+  }
+
+  const marketImpactLabel = readDefaultedStringField(
+    body,
+    "market_impact_label",
+    "simulated_after_close",
+  );
+  if (!marketImpactLabel.ok) {
+    return sendInvalidField(reply, "overnight_scorecard_invalid_field", marketImpactLabel.field);
+  }
+
+  const liveClaim = readDefaultedBooleanField(body, "live_claim", false);
+  if (!liveClaim.ok) {
+    return sendInvalidField(reply, "overnight_scorecard_invalid_field", liveClaim.field);
+  }
+  if (liveClaim.value) {
+    return reply.code(400).send({ error: "overnight_scorecard_live_claim_forbidden" });
+  }
+
+  const run = await pool.query<SandboxRunCaseRow>(
+    `
+      SELECT
+        runs.id,
+        runs.case_bundle_id,
+        cases.manifest_hash
+      FROM overnight_sandbox_runs runs
+      JOIN overnight_case_bundles cases ON cases.id = runs.case_bundle_id
+      WHERE runs.id = $1
+      LIMIT 1
+    `,
+    [runId],
+  );
+
+  if ((run.rowCount ?? 0) === 0) {
+    return reply.code(404).send({ error: "overnight_run_not_found", field: "run_id" });
+  }
+
+  const runCase = run.rows[0];
+  if (agentRunId.value) {
+    const agentRun = await pool.query<{ id: string }>(
+      `
+        SELECT id
+        FROM overnight_agent_runs
+        WHERE id = $1
+          AND sandbox_run_id = $2
+        LIMIT 1
+      `,
+      [agentRunId.value, runId],
+    );
+
+    if ((agentRun.rowCount ?? 0) === 0) {
+      return reply.code(404).send({ error: "overnight_agent_run_not_found", field: "agent_run_id" });
+    }
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await client.query<OvernightScorecardRow>(
+      `
+        INSERT INTO overnight_scorecards (
+          id,
+          sandbox_run_id,
+          agent_run_id,
+          case_bundle_id,
+          score_total,
+          score_dimensions,
+          hard_failures,
+          soft_failures,
+          verifier_version,
+          input_manifest_hash,
+          scenario_hashes,
+          market_impact_label,
+          live_claim,
+          created_at
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          $5,
+          $6::jsonb,
+          $7::jsonb,
+          $8::jsonb,
+          $9,
+          $10,
+          $11::jsonb,
+          $12,
+          $13,
+          NOW()
+        )
+        RETURNING *
+      `,
+      [
+        asString(body.id) ?? randomUUID(),
+        runId,
+        agentRunId.value,
+        runCase.case_bundle_id,
+        scoreTotal.value,
+        JSON.stringify(scoreDimensions.value),
+        JSON.stringify(hardFailures.value),
+        JSON.stringify(softFailures.value),
+        verifierVersion.value,
+        inputManifestHash.value ?? runCase.manifest_hash,
+        JSON.stringify(scenarioHashes.value),
+        marketImpactLabel.value,
+        liveClaim.value,
+      ],
+    );
+
+    if (agentRunId.value) {
+      await client.query(
+        `
+          UPDATE overnight_agent_runs
+          SET scorecard_id = $1,
+              updated_at = NOW()
+          WHERE id = $2
+            AND sandbox_run_id = $3
+        `,
+        [result.rows[0].id, agentRunId.value, runId],
+      );
+    }
+
+    await client.query("COMMIT");
+    return reply.code(201).send({
+      item: mapScorecardRow(result.rows[0]),
+    });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 });
 
 async function start() {

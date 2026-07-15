@@ -496,19 +496,24 @@ Constraints and indexes:
 
 ## 8. API Surface
 
-Future `overnight-arena` service endpoints:
+Current and planned `overnight-arena` service endpoints:
 
 ```text
 POST /v1/internal/overnight/cases/build
 GET  /v1/internal/overnight/cases
+POST /v1/internal/overnight/cases
 GET  /v1/internal/overnight/cases/:case_bundle_id
 POST /v1/internal/overnight/cases/:case_bundle_id/scenarios
 GET  /v1/internal/overnight/cases/:case_bundle_id/scenarios
-POST /v1/internal/overnight/cases/:case_bundle_id/runs
+POST /v1/internal/overnight/cases/:case_bundle_id/settlements
+GET  /v1/internal/overnight/cases/:case_bundle_id/settlements
+GET  /v1/internal/overnight/runs
+POST /v1/internal/overnight/runs
 GET  /v1/internal/overnight/runs/:run_id
 GET  /v1/internal/overnight/runs/:run_id/agent-runs
+POST /v1/internal/overnight/runs/:run_id/agent-runs
 GET  /v1/internal/overnight/runs/:run_id/scorecards
-POST /v1/internal/overnight/cases/:case_bundle_id/settlements
+POST /v1/internal/overnight/runs/:run_id/scorecards
 GET  /v1/arena/overnight/:case_date/leaderboard
 ```
 
@@ -535,6 +540,21 @@ Optional body:
 - `metadata`.
 
 The endpoint writes deterministic JSON under the artifact root, hashes `manifest.json`, and upserts `overnight_case_bundles` by `case_key`. It only uses persisted `external_market_refs` and `belief_prior_snapshots`; no scenario generation or trading logic runs in the builder.
+
+Implemented PR4 registration endpoints:
+
+```text
+GET  /v1/internal/overnight/cases/:case_bundle_id/scenarios
+POST /v1/internal/overnight/cases/:case_bundle_id/scenarios
+GET  /v1/internal/overnight/runs/:run_id/agent-runs
+POST /v1/internal/overnight/runs/:run_id/agent-runs
+GET  /v1/internal/overnight/runs/:run_id/scorecards
+POST /v1/internal/overnight/runs/:run_id/scorecards
+GET  /v1/internal/overnight/cases/:case_bundle_id/settlements
+POST /v1/internal/overnight/cases/:case_bundle_id/settlements
+```
+
+These endpoints register metadata and evidence refs only. They validate case, run, agent, and agent-run relationships; enforce finite numeric fields; default scorecards to `live_claim=false` with `market_impact_label=simulated_after_close`; and reject any overnight scorecard live claim with `overnight_scorecard_live_claim_forbidden`. They do not generate scenarios, execute trades, compute verifier scores, ingest actual data, or fabricate fallback data.
 
 ## 9. Agent Debug Report
 
@@ -682,61 +702,83 @@ Acceptance:
 - manifest hash is stable for identical inputs;
 - empty source tables fail closed with `overnight_case_source_data_empty`.
 
-### PR 4: Scenario ensemble generation
+### PR 4: Metadata and evidence registration endpoints
+
+Work:
+
+- add scenario registration and listing endpoints;
+- upsert `overnight_scenarios` by `(case_bundle_id, scenario_key)`;
+- add agent-run registration and listing endpoints;
+- add scorecard registration and listing endpoints with overnight-safe defaults;
+- add settlement registration and listing endpoints;
+- upsert `overnight_settlements` by `settlement_key`;
+- validate referenced case bundles, sandbox runs, agents, and agent runs;
+- reject `live_claim=true` for overnight scorecards;
+- avoid scenario generation, trading logic, verifier computation, actual-data ingestion, and fake data.
+
+Acceptance:
+
+- invalid registration payloads fail closed with structured agent-readable errors;
+- scorecard defaults include the case bundle manifest hash, empty scenario hashes, `market_impact_label=simulated_after_close`, and `live_claim=false`;
+- `pnpm --filter @automakit/overnight-arena typecheck` passes;
+- `git diff --check` passes.
+
+### PR 5: Scenario ensemble generation
 
 Work:
 
 - define scenario artifact schema;
 - call scenario agents to generate tomorrow paths;
 - validate artifacts strictly;
-- persist `overnight_scenarios`;
-- write `scenario-ensemble.json`.
+- persist registered `overnight_scenarios`;
+- write `scenario-ensemble.json`;
+- update the case bundle `scenario_ensemble_ref`.
 
 Acceptance:
 
 - invalid scenario artifacts fail closed with agent-readable errors;
 - scenario hashes appear in the case bundle.
 
-### PR 5: Sandbox runner
+### PR 6: Sandbox runner
 
 Work:
 
 - seed simulated books from case plus scenario;
 - create starting cash and portfolio refs;
 - route agent tool calls through the gateway;
-- persist `overnight_sandbox_runs` and `overnight_agent_runs`;
+- persist or update `overnight_sandbox_runs` and `overnight_agent_runs`;
 - write action traces.
 
 Acceptance:
 
 - at least one registered agent can complete an overnight sandbox run locally.
 
-### PR 5: Deterministic verifier and scorecards
+### PR 7: Deterministic verifier and scorecards
 
 Work:
 
 - compute tool, risk, forecast, and execution dimensions;
-- persist `overnight_scorecards`;
+- persist computed `overnight_scorecards`;
 - generate agent debug reports.
 
 Acceptance:
 
 - scorecards include input manifest hash, scenario hashes, market-impact label, and `live_claim=false`.
 
-### PR 6: Settlement ingestion
+### PR 8: Settlement artifact ingestion
 
 Work:
 
 - ingest actual next-day data;
 - write settlement artifacts;
-- persist `overnight_settlements`;
+- persist or update `overnight_settlements`;
 - update forecast and execution scores after actuals arrive.
 
 Acceptance:
 
 - a closed case can move from `pending_settlement` to `settled`.
 
-### PR 7: Overnight leaderboard
+### PR 9: Overnight leaderboard
 
 Work:
 
@@ -748,7 +790,7 @@ Acceptance:
 
 - every leaderboard query is scoped by case date or bundle id.
 
-### PR 8: Release-gate integration
+### PR 10: Release-gate integration
 
 Work:
 
